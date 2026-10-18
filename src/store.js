@@ -175,6 +175,25 @@
       });
     },
   };
+  /** Browser localStorage — data is saved on every change; copies older IndexedDB data on first run. */
+  const LocalStorageAdapter = {
+    key: 'sportspro-costing-db',
+    async load() {
+      const raw = localStorage.getItem(this.key);
+      if (raw) return JSON.parse(raw);
+      let old = null;
+      try { if (typeof indexedDB !== 'undefined') old = await IDBAdapter.load(); } catch (e) { old = null; }
+      if (old) localStorage.setItem(this.key, JSON.stringify(old));
+      return old;
+    },
+    async save(db, expectedRev) {
+      const raw = localStorage.getItem(this.key);
+      const cur = raw ? JSON.parse(raw) : null;
+      if (cur && expectedRev !== null && cur.meta.rev !== expectedRev) { const e = new Error('conflict'); e.code = 'CONFLICT'; throw e; }
+      try { localStorage.setItem(this.key, JSON.stringify(db)); }
+      catch (e) { const err = new Error('Browser storage is full — download a backup and remove old data.'); err.code = 'QUOTA'; throw err; }
+    },
+  };
   function MemoryAdapter() {
     let data = null;
     return {
@@ -1461,7 +1480,7 @@
 
   G.SP = G.SP || {};
   Object.assign(G.SP, {
-    AppError, Store, svc, IDBAdapter, MemoryAdapter, PERMS, ROLES, DEFAULT_ROLE_PERMS, can, requirePerm, categories, catLabel,
+    AppError, Store, svc, IDBAdapter, LocalStorageAdapter, MemoryAdapter, PERMS, ROLES, DEFAULT_ROLE_PERMS, can, requirePerm, categories, catLabel,
     lineMetrics, rateOn, computePool, closureChecks, byId, uid, today, now, clone, parseCsv, emptyDb, IMPORTS,
   });
 })(typeof window !== 'undefined' ? window : globalThis);

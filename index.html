@@ -245,7 +245,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
 <body>
 <noscript><div style="padding:24px">This application requires JavaScript.</div></noscript>
 <div id="root"><div class="loading">Loading…</div></div>
-<!-- Sports Pro Garment Costing & Profitability — single-file build 2026-10-16T15:33:53.558Z -->
+<!-- Sports Pro Garment Costing & Profitability — single-file build 2026-10-18T13:48:43.020Z -->
 <script>
 /* ---- core.js ---- */
 /* ==========================================================================
@@ -723,6 +723,25 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
         t.onabort = () => { const e = new Error(conflict ? 'conflict' : 'Save aborted'); e.code = conflict ? 'CONFLICT' : 'ABORT'; rej(e); };
         t.onerror = () => {};
       });
+    },
+  };
+  /** Browser localStorage — data is saved on every change; copies older IndexedDB data on first run. */
+  const LocalStorageAdapter = {
+    key: 'sportspro-costing-db',
+    async load() {
+      const raw = localStorage.getItem(this.key);
+      if (raw) return JSON.parse(raw);
+      let old = null;
+      try { if (typeof indexedDB !== 'undefined') old = await IDBAdapter.load(); } catch (e) { old = null; }
+      if (old) localStorage.setItem(this.key, JSON.stringify(old));
+      return old;
+    },
+    async save(db, expectedRev) {
+      const raw = localStorage.getItem(this.key);
+      const cur = raw ? JSON.parse(raw) : null;
+      if (cur && expectedRev !== null && cur.meta.rev !== expectedRev) { const e = new Error('conflict'); e.code = 'CONFLICT'; throw e; }
+      try { localStorage.setItem(this.key, JSON.stringify(db)); }
+      catch (e) { const err = new Error('Browser storage is full — download a backup and remove old data.'); err.code = 'QUOTA'; throw err; }
     },
   };
   function MemoryAdapter() {
@@ -2011,7 +2030,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
 
   G.SP = G.SP || {};
   Object.assign(G.SP, {
-    AppError, Store, svc, IDBAdapter, MemoryAdapter, PERMS, ROLES, DEFAULT_ROLE_PERMS, can, requirePerm, categories, catLabel,
+    AppError, Store, svc, IDBAdapter, LocalStorageAdapter, MemoryAdapter, PERMS, ROLES, DEFAULT_ROLE_PERMS, can, requirePerm, categories, catLabel,
     lineMetrics, rateOn, computePool, closureChecks, byId, uid, today, now, clone, parseCsv, emptyDb, IMPORTS,
   });
 })(typeof window !== 'undefined' ? window : globalThis);
@@ -4410,8 +4429,8 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
   /* ======================= BOOT ======================= */
   async function boot() {
     const root = document.getElementById('root');
-    if (!G.indexedDB) { root.innerHTML = '<div class="loading">This browser does not support IndexedDB storage.</div>'; return; }
-    try { await Store.init(SP.IDBAdapter); }
+    if (!G.localStorage) { root.innerHTML = '<div class="loading">This browser does not support local storage.</div>'; return; }
+    try { await Store.init(SP.LocalStorageAdapter); }
     catch (e) { console.error(e); root.innerHTML = `<div class="loading">Could not open local storage: ${esc(e.message)}. Private browsing may block it.</div>`; return; }
     svc.restoreSession();
     let lastHash = location.hash;

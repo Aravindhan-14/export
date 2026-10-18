@@ -594,8 +594,8 @@
   /* ======================= BOOT ======================= */
   async function boot() {
     const root = document.getElementById('root');
-    if (!G.indexedDB) { root.innerHTML = '<div class="loading">This browser does not support IndexedDB storage.</div>'; return; }
-    try { await Store.init(SP.IDBAdapter); }
+    if (!G.localStorage) { root.innerHTML = '<div class="loading">This browser does not support local storage.</div>'; return; }
+    try { await Store.init(SP.LocalStorageAdapter); }
     catch (e) { console.error(e); root.innerHTML = `<div class="loading">Could not open local storage: ${esc(e.message)}. Private browsing may block it.</div>`; return; }
     svc.restoreSession();
     let lastHash = location.hash;
