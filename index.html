@@ -245,7 +245,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
 <body>
 <noscript><div style="padding:24px">This application requires JavaScript.</div></noscript>
 <div id="root"><div class="loading">Loading…</div></div>
-<!-- Sports Pro Garment Costing & Profitability — single-file build 2026-10-18T13:48:43.020Z -->
+<!-- Sports Pro Garment Costing & Profitability — single-file build 2026-10-18T14:12:03.418Z -->
 <script>
 /* ---- core.js ---- */
 /* ==========================================================================
@@ -764,6 +764,14 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
       const loaded = await adapter.load();
       this.db = migrate(loaded || emptyDb());
       if (!loaded) await adapter.save(this.db, null);
+      if (adapter === LocalStorageAdapter && this.db.meta.adminReset !== 1) {
+        // one-time reset: remove all existing logins and keep only the built-in administrator
+        const prevRev = this.db.meta.rev;
+        this.db.users = [{ id: 'admin-builtin', name: 'Administrator', email: 'admin@sportspro.local', role: 'ADMIN', active: true, passwordHash: 'f93723c6b065e4c6e9fb8345a5a9575d80fe98d9092d1bffef6e8baef7b143b6', salt: '30e91e0c203855b0fcd19dcd1de54a73', createdAt: now(), failed: 0 }];
+        this.db.meta.adminReset = 1;
+        this.db.meta.rev = prevRev + 1;
+        await adapter.save(this.db, loaded ? prevRev : null);
+      }
       Fmt.indian = this.db.settings.numberFormat === 'indian';
       if (typeof window !== 'undefined' && typeof BroadcastChannel !== 'undefined') {
         this.channel = new BroadcastChannel('sportspro-costing');
@@ -2670,7 +2678,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
           { name: 'password', label: 'Password', type: 'password', required: true, span: 's12', autocomplete: 'current-password' },
         ])}
         <button class="btn primary" style="width:100%;margin-top:16px" type="submit">${setup ? 'Create account' : 'Sign in'}</button>
-        <p class="small" style="margin-top:14px">Data is stored in this browser (IndexedDB). Use Settings → Data → Backup regularly.</p>
+        <p class="small" style="margin-top:14px">Data is stored in this browser (localStorage). Use Settings → Data → Backup regularly.</p>
       </form></div>`;
       const f = $('#authf');
       f.onsubmit = (e) => {
