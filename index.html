@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#1f3a5f">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data: blob: https:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline' https://www.gstatic.com https://www.googletagmanager.com; style-src 'unsafe-inline'; img-src 'self' data: blob: https:; connect-src https://*.googleapis.com https://*.google-analytics.com https://*.analytics.google.com https://*.googletagmanager.com; object-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <title>Sports Pro — Costing &amp; Profitability</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231f3a5f'/%3E%3Ctext x='16' y='21' font-family='Arial' font-size='13' font-weight='700' fill='white' text-anchor='middle'%3ESP%3C/text%3E%3C/svg%3E">
@@ -185,6 +185,31 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
 .sumrow.big{font-size:18px;font-weight:800;color:var(--brand)}
 .sec-total{font-weight:700;font-variant-numeric:tabular-nums}
 
+/* fabric rate build-up (material / process costing) */
+.fb-h{margin:2px 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+.fb-off{display:flex;gap:10px 14px;align-items:center;justify-content:space-between;flex-wrap:wrap;padding:12px;border:1px dashed var(--border-strong);border-radius:8px;margin-bottom:16px}
+.fb-acts{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 12px}
+.fb-table .fb-rate{width:130px} .fb-table .fb-del{width:44px}
+.fb-sum{max-width:440px;margin:0 0 18px auto;padding:10px 14px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2)}
+.fb-sum .sumrow{align-items:center} .fb-sum label{font-weight:400}
+.fb-inp input{width:130px;text-align:right}
+.inp.invalid{border-color:var(--bad);background:#fffafa}
+.fb-src{display:flex;gap:6px 16px;flex-wrap:wrap;margin-top:10px;font-size:13px}
+@media (max-width: 560px){
+  .fb-table thead{display:none}
+  .fb-table,.fb-table tbody,.fb-table tfoot{display:block;width:100%}
+  .fb-table tbody tr{display:grid;grid-template-columns:minmax(0,1fr) 110px auto;gap:6px 8px;padding:10px 8px;border-bottom:1px solid var(--border)}
+  .fb-table tbody td{border:0;padding:0;width:auto!important}
+  .fb-table td.fb-n{display:none}
+  .fb-table td[data-th]::before{content:attr(data-th);display:block;font-size:11px;color:var(--muted);margin-bottom:2px}
+  .fb-table td[data-th="Material / Process"]{grid-column:1/-1}
+  .fb-table td.fb-del{align-self:end}
+  .fb-table tfoot tr{display:flex;justify-content:space-between}
+  .fb-table tfoot td:empty{display:none}
+  .fb-sum{max-width:none}
+  .fb-inp input{width:110px}
+}
+
 /* chart */
 .chart svg{width:100%;height:auto;display:block}
 .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:8px}
@@ -350,7 +375,47 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
   ];
 
   const Calc = {
-    FORMULA_VERSION: 'SP-COST-1.0',
+    FORMULA_VERSION: 'SP-COST-1.1',
+
+    /** Fabric rate build-up (material / process costing for one fabric row):
+        Total cost       = Σ process rates                     (442.00)
+        Loss amount      = Total cost × Loss % / 100, 2 dp     (442.00 × 10% = 44.20)
+        Fabric base cost = Total cost + Loss amount            (486.20)
+        Taken / Pc       = manual rate (optional); Difference = Taken − Base cost.
+        Applied rate     = base cost, or Taken / Pc when rateSource = 'TAKEN'.
+        NOTE: the reference sheet prints 486.40 for these inputs; 486.20 is the arithmetic
+        result and awaits client confirmation (Settings → Costing). */
+    fabricBuild(build) {
+      const b = build || {};
+      const errors = [];
+      const processes = (b.processes || []).map((p, i) => {
+        const label = p.material || `Process ${i + 1}`;
+        let rate = D(0);
+        if (!Dec.valid(p.rate === '' || p.rate == null ? '0' : p.rate)) errors.push(`${label}: rate must be a valid number`);
+        else { rate = D(p.rate); if (rate.isNeg()) errors.push(`${label}: rate must not be negative`); }
+        return Object.assign({}, p, { rate: rate.toString() });
+      });
+      if (!processes.length) errors.push('Add at least one material / process to the fabric build-up');
+      const total = sum(processes, (p) => D(p.rate)).round(RULES.money);
+      let lossPct = D(0);
+      if (!Dec.valid(b.lossPct === '' || b.lossPct == null ? '0' : b.lossPct)) errors.push('Loss % must be a valid number');
+      else { lossPct = D(b.lossPct); if (lossPct.isNeg() || lossPct.gt(100)) errors.push('Loss % must be between 0 and 100'); }
+      const loss = total.pct(lossPct).round(RULES.money);
+      const base = total.add(loss);
+      let taken = null;
+      if (b.takenPc !== '' && b.takenPc != null) {
+        if (!Dec.valid(b.takenPc)) errors.push('Taken / Pc must be a valid number');
+        else { taken = D(b.takenPc).round(RULES.money); if (taken.isNeg()) errors.push('Taken / Pc must not be negative'); }
+      }
+      const rateSource = b.rateSource === 'TAKEN' ? 'TAKEN' : 'BASE';
+      if (rateSource === 'TAKEN' && taken === null) errors.push('Enter Taken / Pc, or use the fabric base cost');
+      const applied = rateSource === 'TAKEN' && taken !== null ? taken : base;
+      return {
+        processes, total: total.toString(), lossPct: lossPct.toString(), loss: loss.toString(), baseCost: base.toString(),
+        takenPc: taken ? taken.toString() : null, difference: taken ? taken.sub(base).toString() : null,
+        rateSource, appliedRate: applied.toString(), errors,
+      };
+    },
 
     /** Expected Qty = Expected Qty per Combo × Expected Number of Combos */
     expectedQty(perCombo, combos) {
@@ -360,10 +425,13 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     },
 
     /** Costing row: Amount/pc = Qty (consumption) × Rate × (1 + Allowance% / 100), rounded 2 dp.
-        Fabric allowance defaults to the workbook loss of 5% (verified on every fabric row). */
+        Fabric allowance defaults to the workbook loss of 5% (verified on every fabric row).
+        A fabric row with a rate build-up uses the build-up's applied rate. */
     lineAmount(line) {
       const qty = D(line.qty === '' || line.qty == null ? 1 : line.qty);
-      const rate = D(line.rate);
+      let rate;
+      if (line.build) { const fb = Calc.fabricBuild(line.build); if (fb.errors.length) throw new Error(fb.errors[0]); rate = D(fb.appliedRate); }
+      else rate = D(line.rate);
       const allow = D(line.allowancePct || 0);
       if (qty.isNeg() || rate.isNeg() || allow.isNeg()) throw new Error('Consumption, rate and allowance must not be negative');
       return qty.mul(rate).mul(D(1).add(allow.div(100))).round(RULES.money);
@@ -642,6 +710,17 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
       numberFormat: 'western',
       poolPrefix: 'BGPL',
       fabricLossPct: '5',
+      // Default material / process template for a new fabric rate build-up (reference costing sheet).
+      fabricBuild: {
+        lossPct: '10', confirmed: false,
+        processes: [
+          { material: 'Yarn', spec: '30s CMB', rate: '300' },
+          { material: 'Knitting', spec: 'Jersey', rate: '12' },
+          { material: 'Dyeing', spec: 'Average Rate', rate: '100' },
+          { material: 'Stendering', spec: '', rate: '20' },
+          { material: 'Compacting', spec: 'OP', rate: '10' },
+        ],
+      },
       defaultPercentages: [{ name: 'REJ + OH + COMM + MARGIN', pct: '40', basis: 'ITEMS' }],
       units: ['kg', 'm', 'yd', 'pc', 'pair', 'set', 'dozen', 'gross', 'cone', 'roll'],
       productTypes: ['T-Shirt', 'Polo', 'Hoody', 'Sweatshirt', 'Pant', 'Shorts', 'Jacket', 'Romper', 'Other'],
@@ -681,7 +760,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     COLLS.forEach((c) => { if (!Array.isArray(db[c])) db[c] = []; });
     const def = defaultSettings();
     db.settings = Object.assign(def, db.settings || {});
-    ['variance', 'shipment', 'pool', 'attachments'].forEach((k) => (db.settings[k] = Object.assign(def[k], db.settings[k] || {})));
+    ['variance', 'shipment', 'pool', 'attachments', 'fabricBuild'].forEach((k) => (db.settings[k] = Object.assign(def[k], db.settings[k] || {})));
     Object.keys(DEFAULT_ROLE_PERMS).forEach((r) => { if (!db.settings.rolePerms[r]) db.settings.rolePerms[r] = DEFAULT_ROLE_PERMS[r].slice(); });
     db.meta.seq = db.meta.seq || {};
     return db;
@@ -764,11 +843,11 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
       const loaded = await adapter.load();
       this.db = migrate(loaded || emptyDb());
       if (!loaded) await adapter.save(this.db, null);
-      if (adapter === LocalStorageAdapter && this.db.meta.adminReset !== 1) {
+      if (adapter === LocalStorageAdapter && this.db.meta.adminReset !== 2) {
         // one-time reset: remove all existing logins and keep only the built-in administrator
         const prevRev = this.db.meta.rev;
-        this.db.users = [{ id: 'admin-builtin', name: 'Administrator', email: 'admin@sportspro.local', role: 'ADMIN', active: true, passwordHash: 'f93723c6b065e4c6e9fb8345a5a9575d80fe98d9092d1bffef6e8baef7b143b6', salt: '30e91e0c203855b0fcd19dcd1de54a73', createdAt: now(), failed: 0 }];
-        this.db.meta.adminReset = 1;
+        this.db.users = [{ id: 'admin-builtin', name: 'Administrator', email: 'admin@sportspro.local', role: 'ADMIN', active: true, passwordHash: '59ccb39638432e7da62c7fe0009022996c962da77f7d476a5031aa4e7e1ea58d', salt: '5652cf079c4bb93d155ed7a4db801a8f', createdAt: now(), failed: 0 }];
+        this.db.meta.adminReset = 2;
         this.db.meta.rev = prevRev + 1;
         await adapter.save(this.db, loaded ? prevRev : null);
       }
@@ -1016,6 +1095,15 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
       if (!['POOL', 'STYLE'].includes(v.scope)) fail('Invalid variance scope');
       s.variance = { method: v.method, scope: v.scope, categories: (v.categories || []).slice(), approved: !!v.approved };
     }
+    if ('fabricBuild' in patch) {
+      const fb = patch.fabricBuild;
+      s.fabricBuild = {
+        lossPct: dec(fb.lossPct, 'fbLossPct', 'Fabric build-up loss %', { max: 100 }),
+        confirmed: !!fb.confirmed,
+        processes: (fb.processes || []).map((p, i) => ({ material: reqStr(p.material, 'fbProc', `Process row ${i + 1}: material / process`, 80), spec: optStr(p.spec, 120), rate: dec(p.rate, 'fbProc', `${p.material || 'Process row ' + (i + 1)}: rate`, { min: 0 }) })),
+      };
+      if (!s.fabricBuild.processes.length) fail('Add at least one material / process to the default template', 'fbProc');
+    }
     if ('shipment' in patch) s.shipment = { maxExcessPct: dec(patch.shipment.maxExcessPct, 'maxExcessPct', 'Max excess %'), requireFinalForClosure: !!patch.shipment.requireFinalForClosure };
     if ('pool' in patch) s.pool = { allowPartialAllocation: !!patch.pool.allowPartialAllocation };
     if ('attachments' in patch) s.attachments = { enabled: !!patch.attachments.enabled, maxKb: int(patch.attachments.maxKb, 'maxKb', 'Max attachment size', { min: 50 }) };
@@ -1146,19 +1234,32 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
   });
 
   /* ---------- Costing ---------- */
+  function cleanBuild(b, field, label) {
+    const out = {
+      processes: (b.processes || []).map((p, j) => ({ id: p.id || uid(), material: reqStr(p.material, field, `${label}: build-up row ${j + 1} material / process`, 80), spec: optStr(p.spec, 120), rate: dec(p.rate, field, `${label}: ${p.material || 'build-up row ' + (j + 1)} rate`, { min: 0 }) })),
+      lossPct: dec(b.lossPct, field, `${label}: build-up loss %`, { max: 100 }),
+      takenPc: dec(b.takenPc, field, `${label}: Taken / Pc`, { required: false }) || '',
+      rateSource: b.rateSource === 'TAKEN' ? 'TAKEN' : 'BASE',
+    };
+    const r = Calc.fabricBuild(out);
+    if (r.errors.length) fail(`${label}: ${r.errors[0]}`, field);
+    return out;
+  }
   function cleanLines(db, lines) {
     const cats = categories(db).map((c) => c.key);
     return (lines || []).map((l, i) => {
       if (!cats.includes(l.category)) fail(`Row ${i + 1}: unknown category`);
       const label = `${catLabel(l.category, db)} row ${i + 1}`;
+      const build = l.category === 'FABRIC' && l.build ? cleanBuild(l.build, 'line' + i, label) : null;
       const out = {
         id: l.id || uid(), category: l.category, name: reqStr(l.name, 'line' + i, `${label}: name`),
         description: optStr(l.description, 300), composition: optStr(l.composition, 200), gsm: optStr(l.gsm, 20), colour: optStr(l.colour, 80),
         unit: optStr(l.unit, 20), rateUnit: optStr(l.rateUnit, 20),
         qty: dec(l.qty === '' || l.qty == null ? '1' : l.qty, 'line' + i, `${label}: consumption/qty`, { min: 0 }),
-        rate: dec(l.rate, 'line' + i, `${label}: rate`, { min: 0 }),
+        rate: build ? Calc.fabricBuild(build).appliedRate : dec(l.rate, 'line' + i, `${label}: rate`, { min: 0 }),
         allowancePct: dec(l.allowancePct || '0', 'line' + i, `${label}: allowance %`, { min: 0 }),
         remarks: optStr(l.remarks, 500),
+        build,
       };
       if (out.unit && !db.settings.units.includes(out.unit)) fail(`${label}: unit "${out.unit}" is not a configured unit`);
       if (out.rateUnit && !db.settings.units.includes(out.rateUnit)) fail(`${label}: rate unit "${out.rateUnit}" is not a configured unit`);
@@ -2960,7 +3061,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
   /* ======================= COSTING LIST ======================= */
   App.route('costing', 'costing.view', async (view, q) => {
     view.innerHTML = pageHead('Costing Inputs', 'Costing versions per style. Approved versions are locked; use “Save As” to create a revision.', guard('costing.edit', btn('New costing', 'id="newC"', 'primary', 'plus'))) +
-      `<div class="notice info">Formula ${esc(Calc.FORMULA_VERSION)}: row amount = qty/consumption × rate × (1 + allowance%). Fabric loss default ${esc(Store.db.settings.fabricLossPct)}% (verified against the workbook). Total INR = items total + overall %; foreign price = total INR ÷ INR per unit.</div>
+      `<div class="notice info">Formula ${esc(Calc.FORMULA_VERSION)}: row amount = qty/consumption × rate × (1 + allowance%). Fabric loss default ${esc(Store.db.settings.fabricLossPct)}% (verified against the workbook). A fabric row can build its rate from material / process rates: base cost = total + loss %. Total INR = items total + overall %; foreign price = total INR ÷ INR per unit.</div>
       <div class="card"><div class="bd p0" id="ct"></div></div>`;
     table($('#ct', view), {
       id: 'costings', exportName: 'costing-versions', rows: () => Store.db.costings, sort: { key: 'updatedAt', dir: 'desc' },
@@ -3007,15 +3108,16 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     const quotes = Store.db.quotes.filter((x) => x.costingId === v0.id);
     const siblings = Store.db.costings.filter((c) => c.styleId === v0.styleId).sort((a, b) => a.versionNo - b.versionNo);
     const unitSel = (l, f) => `<select class="cell" data-li="${l.id}" data-f="${f}" ${editable ? '' : 'disabled'}><option value=""></option>${units.map((u) => `<option${l[f] === u ? ' selected' : ''}>${esc(u)}</option>`).join('')}</select>`;
-    const inp = (l, f, cls, ph) => `<input class="cell ${cls || ''}" data-li="${l.id}" data-f="${f}" value="${esc(l[f] === undefined || l[f] === null ? '' : l[f])}" ${editable ? '' : 'readonly'} ${cls === 'num' ? 'inputmode="decimal"' : ''} placeholder="${esc(ph || '')}" aria-label="${esc(f)}">`;
+    const inp = (l, f, cls, ph, lock) => `<input class="cell ${cls || ''}" data-li="${l.id}" data-f="${f}" value="${esc(l[f] === undefined || l[f] === null ? '' : l[f])}" ${editable && !lock ? '' : 'readonly'} ${lock ? 'title="From the fabric rate build-up — open Details to change"' : ''} ${cls === 'num' ? 'inputmode="decimal"' : ''} placeholder="${esc(ph || '')}" aria-label="${esc(f)}">`;
+    const buildNote = (b) => { const r = Calc.fabricBuild(b); return `<div class="small faint">Build-up: base ${Fmt.inr(r.baseCost)}${r.takenPc ? ` · taken ${Fmt.inr(r.takenPc)}` : ''} → rate ${Fmt.inr(r.appliedRate)}</div>`; };
     const rowHtml = (l, i, n) => {
       const unitCols = l.category === 'FABRIC' || l.category === 'TRIMS';
       return `<tr data-row="${l.id}"><td class="faint small">${i + 1}</td>
-        <td style="min-width:170px">${inp(l, 'name', '', 'Name')}${l.category === 'FABRIC' && (l.composition || l.gsm || l.colour) ? `<div class="small faint">${esc([l.composition, l.gsm && l.gsm + ' GSM', l.colour].filter(Boolean).join(' · '))}</div>` : ''}</td>
+        <td style="min-width:170px">${inp(l, 'name', '', 'Name')}${l.category === 'FABRIC' && (l.composition || l.gsm || l.colour) ? `<div class="small faint">${esc([l.composition, l.gsm && l.gsm + ' GSM', l.colour].filter(Boolean).join(' · '))}</div>` : ''}${l.build ? buildNote(l.build) : ''}</td>
         ${l.category === 'FABRIC' ? '' : `<td style="min-width:140px" class="hide-sm">${inp(l, 'description', '', 'Description')}</td>`}
         <td style="width:110px">${inp(l, 'qty', 'num', '1')}</td>
         ${unitCols ? `<td style="width:90px">${unitSel(l, 'unit')}</td>` : ''}
-        <td style="width:110px">${inp(l, 'rate', 'num', '0.00')}</td>
+        <td style="width:110px">${inp(l, 'rate', 'num', '0.00', !!l.build)}</td>
         ${unitCols ? `<td style="width:90px">${unitSel(l, 'rateUnit')}</td>` : ''}
         <td style="width:80px">${inp(l, 'allowancePct', 'num', '0')}</td>
         <td class="num" style="width:100px"><b data-amt="${l.id}">—</b></td>
@@ -3124,26 +3226,98 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     };
     const lineDetail = (l) => {
       const isF = l.category === 'FABRIC';
+      const tpl = Store.db.settings.fabricBuild;
+      let b = l.build ? SP.clone(l.build) : null;
+      const newBuild = () => ({ processes: tpl.processes.map((p) => Object.assign({ id: SP.uid() }, p)), lossPct: tpl.lossPct, takenPc: '', rateSource: 'BASE' });
+      const buildHtml = () => {
+        if (!b) return `<div class="fb-off"><p class="small muted" style="margin:0">Enter the base rate directly below, or build it up from yarn and process rates (total + loss % = fabric base cost).</p>${editable ? `<button class="btn sm" type="button" id="fbOn">${ico('plus')}Build rate from materials &amp; processes</button>` : ''}</div>`;
+        const ro = editable ? '' : 'readonly';
+        return `<div class="table-wrap"><table class="t fb-table"><thead><tr><th>#</th><th>Material / Process</th><th>Type / Spec</th><th class="num">Rate (₹)</th><th></th></tr></thead><tbody>${b.processes.map((p, i) => `<tr data-bp="${p.id}"><td class="faint small fb-n">${i + 1}</td>
+            <td data-th="Material / Process"><input class="cell" data-bf="material" value="${esc(p.material)}" placeholder="e.g. Yarn" maxlength="80" aria-label="Material / process" ${ro}></td>
+            <td data-th="Type / Spec"><input class="cell" data-bf="spec" value="${esc(p.spec || '')}" placeholder="optional" maxlength="120" aria-label="Type / spec" ${ro}></td>
+            <td data-th="Rate (₹)" class="fb-rate"><input class="cell num" data-bf="rate" value="${esc(p.rate)}" inputmode="decimal" placeholder="0.00" aria-label="Rate" ${ro}></td>
+            <td class="fb-del">${editable ? `<button class="btn xs danger" type="button" data-bdel="${p.id}" aria-label="Remove row">${ico('trash')}</button>` : ''}</td></tr>`).join('')}</tbody>
+            <tfoot><tr><td colspan="3">Total cost</td><td class="num" id="fbTotal">—</td><td></td></tr></tfoot></table></div>
+          ${editable ? `<div class="fb-acts"><button class="btn sm" type="button" id="fbAdd">${ico('plus')}Add material / process</button><button class="btn sm danger" type="button" id="fbOff">Remove build-up</button></div>` : ''}
+          <div class="fb-sum">
+            <div class="sumrow"><span>Total cost</span><span class="num" id="fbTotal2">—</span></div>
+            <div class="sumrow"><label for="fbLoss">Loss %</label><span class="fb-inp"><input id="fbLoss" class="inp num" inputmode="decimal" value="${esc(b.lossPct)}" ${ro}></span></div>
+            <div class="sumrow"><span>Loss amount</span><span class="num" id="fbLossAmt">—</span></div>
+            <div class="sumrow total big"><span>Fabric base cost</span><span class="num" id="fbBase">—</span></div>
+            <div class="sumrow"><label for="fbTaken">Taken / Pc</label><span class="fb-inp"><input id="fbTaken" class="inp num" inputmode="decimal" value="${esc(b.takenPc || '')}" placeholder="optional" ${ro}></span></div>
+            <div class="sumrow"><span>Taken − base cost</span><span class="num" id="fbDiff">—</span></div>
+            <div class="fb-src" role="radiogroup" aria-label="Rate used in the costing input">
+              <label class="check"><input type="radio" name="fbSrc" value="BASE" ${b.rateSource !== 'TAKEN' ? 'checked' : ''} ${editable ? '' : 'disabled'}> Use fabric base cost</label>
+              <label class="check"><input type="radio" name="fbSrc" value="TAKEN" ${b.rateSource === 'TAKEN' ? 'checked' : ''} ${editable ? '' : 'disabled'}> Use Taken / Pc</label>
+            </div>
+            <div class="notice bad hidden" id="fbErr" role="alert" style="margin-top:8px"></div>
+            ${tpl.confirmed ? '' : '<div class="small muted" style="margin-top:6px">Base cost = total + loss. The reference sheet shows ₹486.40 for the default rows, but its own figures add up to ₹486.20, so the formula is still awaiting client confirmation.</div>'}
+          </div>`;
+      };
       modal({
         title: `${H.catLabel(l.category)} details`, size: 'lg',
-        body: form([
+        body: (isF ? `<h3 class="fb-h">Material / process costing</h3><div id="fbBox" data-noread></div><h3 class="fb-h">Costing input</h3>` : '') + form([
           { name: 'name', label: isF ? 'Fabric name' : 'Name', required: true, span: 's6' },
           { name: 'description', label: 'Description', span: 's6' },
           ...(isF ? [{ name: 'composition', label: 'Composition', span: 's4' }, { name: 'gsm', label: 'GSM', span: 's4' }, { name: 'colour', label: 'Colour', span: 's4' }] : []),
           { name: 'qty', label: QTY_LABEL[l.category] || 'Qty / basis', type: 'decimal', span: 's3', help: isF ? 'Weight per piece in the unit below' : 'Default 1' },
           { name: 'unit', label: 'Unit', type: 'select', options: units, span: 's3' },
-          { name: 'rate', label: isF ? 'Base rate' : 'Rate', type: 'decimal', required: true, span: 's3' },
+          { name: 'rate', label: isF ? 'Base rate' : 'Rate', type: 'decimal', required: true, span: 's3', help: isF ? 'Filled from the build-up when one is used' : '' },
           { name: 'rateUnit', label: 'Rate unit', type: 'select', options: units, span: 's3', help: 'Must match the consumption unit' },
-          { name: 'allowancePct', label: isF ? 'Loss %' : 'Allowance %', type: 'decimal', span: 's3' },
+          { name: 'allowancePct', label: isF ? 'Loss %' : 'Allowance %', type: 'decimal', span: 's3', help: isF ? 'Consumption loss on this row (separate from the build-up loss)' : '' },
           { name: 'calc', label: 'Calculated cost / pc', type: 'static', span: 's9', html: '<b id="dAmt">—</b> <span class="small muted">= qty × rate × (1 + %/100)</span>' },
           { name: 'remarks', label: 'Remarks', type: 'textarea', span: 's12' },
         ], l),
         onMount: (m) => {
-          const upd = () => { const v = read(m.el); try { if (!Calc.unitsCompatible(v)) throw new Error('Incompatible units'); $('#dAmt', m.el).textContent = Fmt.inr(Calc.lineAmount(v).toString()); } catch (e) { $('#dAmt', m.el).textContent = e.message; } };
-          m.el.addEventListener('input', upd); m.el.addEventListener('change', upd); upd();
-          if (!editable) $$('input,select,textarea', m.el).forEach((x) => (x.disabled = true));
+          const rateIn = $('[name=rate]', m.el);
+          const fbBox = $('#fbBox', m.el);
+          const bad = (x, { max } = {}) => x.trim() !== '' && (!SP.Dec.valid(x) || D(x).isNeg() || (max !== undefined && D(x).gt(max)));
+          const upd = () => {
+            let rateErr = null;
+            if (b) {
+              const r = Calc.fabricBuild(b);
+              $('#fbTotal', m.el).textContent = Fmt.inr(r.total); $('#fbTotal2', m.el).textContent = Fmt.inr(r.total);
+              $('#fbLossAmt', m.el).textContent = Fmt.inr(r.loss); $('#fbBase', m.el).textContent = Fmt.inr(r.baseCost);
+              $('#fbDiff', m.el).textContent = r.difference === null ? '—' : (D(r.difference).isNeg() ? '−' : '+') + Fmt.inr(D(r.difference).abs().toString());
+              $$('[data-bf=rate]', fbBox).forEach((i) => i.classList.toggle('invalid', bad(i.value)));
+              $('#fbLoss', m.el).classList.toggle('invalid', bad(b.lossPct || '', { max: 100 }));
+              $('#fbTaken', m.el).classList.toggle('invalid', bad(b.takenPc || ''));
+              const e = $('#fbErr', m.el); e.textContent = r.errors[0] || ''; e.classList.toggle('hidden', !r.errors.length);
+              if (r.errors.length) rateErr = r.errors[0];
+              rateIn.value = r.errors.length ? '' : D(r.appliedRate).toFixed(2);
+            }
+            rateIn.readOnly = !editable || !!b;
+            const v = read(m.el);
+            try { if (rateErr) throw new Error(rateErr); if (!Calc.unitsCompatible(v)) throw new Error('Incompatible units'); $('#dAmt', m.el).textContent = Fmt.inr(Calc.lineAmount(v).toString()); } catch (e) { $('#dAmt', m.el).textContent = e.message; }
+          };
+          const drawBuild = () => {
+            if (!fbBox) return;
+            fbBox.innerHTML = buildHtml();
+            const on = $('#fbOn', fbBox); if (on) on.onclick = () => { b = newBuild(); drawBuild(); };
+            const off = $('#fbOff', fbBox); if (off) off.onclick = () => { b = null; drawBuild(); };
+            const add = $('#fbAdd', fbBox); if (add) add.onclick = () => { b.processes.push({ id: SP.uid(), material: '', spec: '', rate: '' }); drawBuild(); const i = $$('[data-bf=material]', fbBox).pop(); i && i.focus(); };
+            $$('[data-bdel]', fbBox).forEach((x) => (x.onclick = () => { b.processes = b.processes.filter((p) => p.id !== x.dataset.bdel); drawBuild(); }));
+            $$('[data-bf]', fbBox).forEach((i) => (i.oninput = () => { b.processes.find((p) => p.id === i.closest('[data-bp]').dataset.bp)[i.dataset.bf] = i.value; }));
+            const ln = $('#fbLoss', fbBox); if (ln) ln.oninput = () => { b.lossPct = ln.value; };
+            const tk = $('#fbTaken', fbBox); if (tk) tk.oninput = () => { b.takenPc = tk.value; };
+            $$('[name=fbSrc]', fbBox).forEach((x) => (x.onchange = () => { b.rateSource = x.value; }));
+            upd();
+          };
+          // per-field handlers update the build state first; this bubbling listener then recalculates
+          m.el.addEventListener('input', upd); m.el.addEventListener('change', upd);
+          drawBuild();
+          if (!editable) $$('input,select,textarea,button[data-bdel]', m.el).forEach((x) => (x.disabled = true));
         },
-        actions: editable ? [{ label: 'Cancel' }, { label: 'Apply', cls: 'primary', onClick: (m) => { const v = read(m.el); if (!v.name.trim()) throw new AppError('Name is required', 'name'); delete v.calc; Object.assign(l, v); setDirty(true); draw(); } }] : [{ label: 'Close' }],
+        actions: editable ? [{ label: 'Cancel' }, { label: 'Apply', cls: 'primary', onClick: (m) => {
+          const v = read(m.el); if (!v.name.trim()) throw new AppError('Name is required', 'name'); delete v.calc;
+          if (b) {
+            const blank = b.processes.findIndex((p) => !String(p.material || '').trim());
+            if (blank >= 0) throw new AppError(`Build-up row ${blank + 1}: enter the material / process`);
+            const r = Calc.fabricBuild(b); if (r.errors.length) throw new AppError(r.errors[0]);
+            v.rate = r.appliedRate;
+          }
+          v.build = b; Object.assign(l, v); setDirty(true); draw();
+        } }] : [{ label: 'Close' }],
       });
     };
     const copyRows = (targetCat) => {
@@ -3172,6 +3346,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     const style = H.style(v.styleId);
     return `<div class="grid"><div><b>Style:</b> ${esc(style.styleRef)} — ${esc(style.description || '')}</div><div><b>Buyer:</b> ${esc(H.buyer(style.buyerId).name)}</div><div><b>Season:</b> ${esc(style.season)}</div><div><b>Version:</b> ${esc(v.label)} (${esc(v.status)})</div><div><b>Currency:</b> ${esc(v.currency)} @ ₹${Fmt.num(v.exchangeRate, 4)} ${v.rateDate ? '(' + fmtDate(v.rateDate) + ')' : ''}</div><div><b>Formula:</b> ${esc(v.formulaVersion)}</div></div>
       ${H.cats().filter((c) => v.lines.some((l) => l.category === c.key)).map((c) => `<h2>${esc(c.label)}</h2><table><thead><tr><th>Item</th><th>Details</th><th class="num">Qty</th><th class="num">Rate</th><th class="num">%</th><th class="num">Amount</th></tr></thead><tbody>${v.lines.filter((l) => l.category === c.key).map((l) => `<tr><td>${esc(l.name)}</td><td>${esc([l.description, l.composition, l.gsm && l.gsm + ' GSM', l.colour, l.unit].filter(Boolean).join(' · '))}</td><td class="num">${esc(l.qty)}</td><td class="num">${Fmt.num(l.rate)}</td><td class="num">${esc(l.allowancePct)}</td><td class="num">${Fmt.num(r.lineAmounts[l.id])}</td></tr>`).join('')}</tbody><tfoot><tr><td colspan="5">Subtotal</td><td class="num">${Fmt.inr(r.categories[c.key])}</td></tr></tfoot></table>`).join('')}
+      ${v.lines.filter((l) => l.build).map((l) => { const b = Calc.fabricBuild(l.build); return `<h2>Fabric rate build-up — ${esc(l.name)}</h2><table><thead><tr><th>Material / Process</th><th>Type / Spec</th><th class="num">Rate</th></tr></thead><tbody>${b.processes.map((x) => `<tr><td>${esc(x.material)}</td><td>${esc(x.spec || '')}</td><td class="num">${Fmt.num(x.rate)}</td></tr>`).join('')}</tbody><tfoot><tr><td colspan="2">Total cost</td><td class="num">${Fmt.inr(b.total)}</td></tr><tr><td colspan="2">Loss (${Fmt.pct(b.lossPct)})</td><td class="num">${Fmt.inr(b.loss)}</td></tr><tr><td colspan="2">Fabric base cost</td><td class="num">${Fmt.inr(b.baseCost)}</td></tr>${b.takenPc ? `<tr><td colspan="2">Taken / Pc</td><td class="num">${Fmt.inr(b.takenPc)}</td></tr>` : ''}<tr><td colspan="2">Rate used in costing (${b.rateSource === 'TAKEN' ? 'Taken / Pc' : 'base cost'})</td><td class="num">${Fmt.inr(b.appliedRate)}</td></tr></tfoot></table>`; }).join('')}
       <h2>Summary</h2><table><tbody><tr><td>All items total</td><td class="num">${Fmt.inr(r.itemsTotal)}</td></tr>${r.percentages.map((p) => `<tr><td>${esc(p.name)} ${Fmt.pct(p.pct)} (${p.basis === 'ITEMS' ? 'of items' : 'of running total'})</td><td class="num">${Fmt.inr(p.amount)}</td></tr>`).join('')}<tr><td><b>Total INR / pc</b></td><td class="num"><b>${Fmt.inr(r.totalInr)}</b></td></tr><tr><td><b>Price (${esc(v.currency)})</b></td><td class="num"><b>${Fmt.money(r.foreignPrice, v.currency, 4)}</b></td></tr></tbody></table>`;
   }
 
@@ -4377,11 +4552,19 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
       save('sG', (c) => { const v = read(c); return { company: v.company, numberFormat: v.numberFormat, sessionMinutes: v.sessionMinutes }; });
     } else if (tab === 'costing') {
       sb.innerHTML = card('Costing formula', `<p class="small muted" style="margin-top:0">Row amount = qty/consumption × rate × (1 + allowance %). Fabric uses a loss allowance: the workbook's fabric amounts (e.g. 0.080 kg × ₹500 = 40 → 42.00) are all reproduced with 5%. New fabric rows default to the value below; each row can override it.</p>` + form([{ name: 'fabricLossPct', label: 'Default fabric loss %', type: 'decimal', span: 's4' }], s) + `<h3 style="margin:16px 0 6px">Default overall percentage components (new costings)</h3><div id="pctList"></div><button class="btn sm" type="button" id="pctAdd">${ico('plus')}Add component</button>`, 'sC') +
+        card('Fabric rate build-up — default template', `${s.fabricBuild.confirmed ? '' : '<div class="notice warn"><b>Pending confirmation.</b> The reference costing sheet lists Yarn 300 + Knitting 12 + Dyeing 100 + Stendering 20 + Compacting 10 = ₹442.00, and 10% loss = ₹44.20, but it prints the fabric base cost as ₹486.40. The arithmetic gives ₹486.20, which is what the app calculates (base cost = total + total × loss %). Tick the box below once the client confirms this.</div>'}<p class="small muted" style="margin-top:0">These rows and the loss % are copied into a fabric row when the user chooses “Build rate from materials &amp; processes”, and can be edited there. Existing costings are not changed.</p>` + form([{ name: 'fbLossPct', label: 'Default build-up loss %', type: 'decimal', span: 's4', help: 'Process loss on the build-up total (separate from the fabric row consumption loss)' }, { name: 'fbConfirmed', label: 'Formula confirmed by the client (base cost = total + loss)', type: 'checkbox', span: 's12' }], { fbLossPct: s.fabricBuild.lossPct, fbConfirmed: s.fabricBuild.confirmed }) + `<div class="table-wrap" style="margin-top:12px"><div id="fbList"></div></div><button class="btn sm" type="button" id="fbAddT">${ico('plus')}Add material / process</button><div class="small muted" id="fbPrev" style="margin-top:8px"></div>`, 'sFB') +
         card('Master lists', form([{ name: 'units', label: 'Units (comma separated)', span: 's12', help: 'Consumption and rate units must match on a costing row; incompatible units are rejected.' }, { name: 'productTypes', label: 'Product types', span: 's12' }, { name: 'extraCategories', label: 'Additional expense categories', span: 's12', help: 'Added after Fabric, Application, Others, CMT, Trims, Labelling, Packing accessories, Packaging, Forwarding, Bank charges' }, { name: 'sizeSets', label: 'Size sets (one per line: Name: size1, size2, …)', type: 'textarea', span: 's12', attrs: 'rows="5"' }], { units: s.units.join(', '), productTypes: s.productTypes.join(', '), extraCategories: s.extraCategories.join(', '), sizeSets: s.sizeSets.map((x) => `${x.name}: ${x.sizes.join(', ')}`).join('\n') }), 'sM');
       let pcts = SP.clone(s.defaultPercentages);
       const drawP = () => { $('#pctList', sb).innerHTML = `<table class="t"><thead><tr><th>Name</th><th>%</th><th>Basis</th><th></th></tr></thead><tbody>${pcts.map((p, i) => `<tr><td><input class="cell" data-i="${i}" data-f="name" value="${esc(p.name)}"></td><td style="width:90px"><input class="cell num" data-i="${i}" data-f="pct" value="${esc(p.pct)}"></td><td><select class="cell" data-i="${i}" data-f="basis"><option value="ITEMS"${p.basis === 'ITEMS' ? ' selected' : ''}>% of items total</option><option value="CUMULATIVE"${p.basis === 'CUMULATIVE' ? ' selected' : ''}>% of running total</option></select></td><td><button class="btn xs danger" data-rm="${i}" type="button">${ico('trash')}</button></td></tr>`).join('')}</tbody></table>`; $$('[data-i]', sb).forEach((x) => (x.oninput = x.onchange = () => (pcts[+x.dataset.i][x.dataset.f] = x.value))); $$('[data-rm]', sb).forEach((b) => (b.onclick = () => { pcts.splice(+b.dataset.rm, 1); drawP(); })); };
       drawP(); $('#pctAdd', sb).onclick = () => { pcts.push({ name: 'Component', pct: '0', basis: 'ITEMS' }); drawP(); };
       save('sC', (c) => ({ fabricLossPct: read(c).fabricLossPct, defaultPercentages: pcts }));
+      let fbRows = SP.clone(s.fabricBuild.processes);
+      const fbCard = $('#sFB', sb).closest('.card');
+      const prevFB = () => { const r = Calc.fabricBuild({ processes: fbRows, lossPct: $('[name=fbLossPct]', fbCard).value }); $('#fbPrev', sb).textContent = r.errors.length ? r.errors[0] : `Preview: total ${Fmt.inr(r.total)} + loss ${Fmt.inr(r.loss)} = fabric base cost ${Fmt.inr(r.baseCost)}`; };
+      const drawFB = () => { $('#fbList', sb).innerHTML = `<table class="t fb-table"><thead><tr><th>#</th><th>Material / Process</th><th>Type / Spec</th><th class="num">Rate (₹)</th><th></th></tr></thead><tbody>${fbRows.map((p, i) => `<tr><td class="faint small fb-n">${i + 1}</td><td data-th="Material / Process"><input class="cell" data-fi="${i}" data-f="material" value="${esc(p.material)}" maxlength="80"></td><td data-th="Type / Spec"><input class="cell" data-fi="${i}" data-f="spec" value="${esc(p.spec || '')}" maxlength="120"></td><td data-th="Rate (₹)" class="fb-rate"><input class="cell num" data-fi="${i}" data-f="rate" value="${esc(p.rate)}" inputmode="decimal"></td><td class="fb-del"><button class="btn xs danger" data-fr="${i}" type="button" aria-label="Remove row">${ico('trash')}</button></td></tr>`).join('')}</tbody></table>`; $$('[data-fi]', sb).forEach((x) => (x.oninput = () => { fbRows[+x.dataset.fi][x.dataset.f] = x.value; prevFB(); })); $$('[data-fr]', sb).forEach((b) => (b.onclick = () => { fbRows.splice(+b.dataset.fr, 1); drawFB(); })); prevFB(); };
+      drawFB(); $('#fbAddT', sb).onclick = () => { fbRows.push({ material: '', spec: '', rate: '0' }); drawFB(); };
+      $('[name=fbLossPct]', fbCard).oninput = prevFB;
+      save('sFB', (c) => { const v = read(c); return { fabricBuild: { lossPct: v.fbLossPct, confirmed: v.fbConfirmed, processes: fbRows } }; });
       save('sM', (c) => { const v = read(c); const split = (x) => x.split(',').map((y) => y.trim()).filter(Boolean); return { units: split(v.units), productTypes: split(v.productTypes), extraCategories: split(v.extraCategories), sizeSets: v.sizeSets.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => { const i = l.indexOf(':'); if (i < 0) throw new AppError(`Size set line "${l}" must be "Name: size1, size2"`); return { name: l.slice(0, i).trim(), sizes: split(l.slice(i + 1)) }; }) }; });
     } else if (tab === 'limits') {
       const v = s.variance;
@@ -4463,6 +4646,37 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
   document.addEventListener('DOMContentLoaded', boot);
 })(window);
 
+</script>
+<script type="module">
+/* ---- firebase.js ---- */
+/* Firebase app + Analytics (Firebase JS SDK, modular, loaded from the official CDN).
+   Business data stays in the existing Store adapter (localStorage); this module only
+   initialises Firebase and reports in-app route changes. A failure here (offline,
+   file://, blocked) never affects the application. */
+const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/10.12.2';
+const firebaseConfig = {
+  apiKey: 'AIzaSyDU4sPBXxdyXGFgyvhLv0jKLe2VyOnkIHg',
+  authDomain: 'exports-14e94.firebaseapp.com',
+  projectId: 'exports-14e94',
+  storageBucket: 'exports-14e94.firebasestorage.app',
+  messagingSenderId: '207916589361',
+  appId: '1:207916589361:web:009b589d8808a547999010',
+  measurementId: 'G-VRE8D8T14C',
+};
+(async () => {
+  try {
+    const { initializeApp } = await import(`${FIREBASE_SDK}/firebase-app.js`);
+    const { getAnalytics, isSupported, logEvent } = await import(`${FIREBASE_SDK}/firebase-analytics.js`);
+    const app = initializeApp(firebaseConfig);
+    const analytics = (await isSupported()) ? getAnalytics(app) : null;
+    window.SP.Firebase = { app, analytics };
+    if (analytics) {
+      // hash routes only (no record ids / query strings)
+      const route = () => location.hash.replace(/^#\/?/, '').split('?')[0] || 'home';
+      window.addEventListener('hashchange', () => logEvent(analytics, 'screen_view', { firebase_screen: route(), firebase_screen_class: 'SPA' }));
+    }
+  } catch (e) { console.warn('Firebase not initialised:', e && e.message); }
+})();
 </script>
 </body>
 </html>
