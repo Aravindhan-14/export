@@ -1,0 +1,36 @@
+rules_version = '2';
+
+// Cloud Firestore security rules for project: exports-14e94
+// The app stores its whole database in one document: collection "costing", document "app".
+//
+// HOW TO APPLY:
+//   Firebase Console  ->  Build  ->  Firestore Database  ->  Rules tab
+//   Paste everything below, then click "Publish".
+//
+// NOTE: These are open "test mode" rules — anyone who has the app can read/write.
+// That is fine to get started. Before real/wider use, switch to the locked-down
+// version at the bottom (requires enabling Anonymous sign-in in Authentication).
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---- TEST MODE (use this now) ----
+    match /{document=**} {
+      allow read, write: if true;
+    }
+
+  }
+}
+
+// ---------------------------------------------------------------------------
+// LATER (more secure): enable Authentication -> Sign-in method -> Anonymous,
+// then replace the block above with this one:
+//
+// service cloud.firestore {
+//   match /databases/{database}/documents {
+//     match /{document=**} {
+//       allow read, write: if request.auth != null;
+//     }
+//   }
+// }
+// ---------------------------------------------------------------------------

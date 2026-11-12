@@ -1,0 +1,56 @@
+ // Import the functions you need from the SDKs you need
+    import { initializeApp } from "firebase/app";
+    import { getAnalytics } from "firebase/analytics";
+    // TODO: Add SDKs for Firebase products that you want to use
+    // https://firebase.google.com/docs/web/setup#available-libraries
+
+    // Your web app's Firebase configuration
+    // For Firebase JS SDK v7.20.0 and later, measureme
+    const firebaseConfig = {
+      apiKey: "AIzaSyDU4sPBXxdyXGFgyvhLv0jKLe2VyOnkIHg"
+      authDomain: "exports-14e94.firebaseapp.com",
+      projectId: "exports-14e94",
+      storageBucket: "exports-14e94.firebasestorage.app",
+      messagingSenderId: "207916589361",
+      appId: "1:207916589361:web:009b589d8808a547999010",
+      measurementId: "G-VRE8D8T14C"
+    };
+
+    // Initialize Firebase
+    const app = initializeApp(firebaseConfig);
+    const analytics = getAnalytics(app);
+
+    use this firebase sdk
+
+    Analyze the attached fabric costing image and implement the same costing calculation logic in my existing software application.
+
+    Requirements:
+  - Create a Material / Process costing table with the
+  - Include the following entries as shown in the image:
+    - Yarn – 30s CMB – ₹300.00
+    - Knitting – Jersey – ₹12.00
+    - Dyeing – Average Rate – ₹100.00
+    - Stendering – ₹20.00
+    - Compacting – OP – ₹10.00
+  - Automatically calculate the total cost by adding all process rates.
+  - Add a configurable Loss Percentage field. By defaul
+  - Calculate the loss amount based on the total cost.
+  - Calculate the Fabric Base Cost by adding the total
+  - Add a Taken / Pc field that allows manual entry, as shown in the image (₹500.00).
+  - Display the calculated Fabric Base Cost and manuall
+  - Provide a COSTING INPUT section that uses the calculated fabric base cost.
+  - Implement proper validation, automatic recalculatio formatting.
+  - Make the interface fully responsive for mobile, tablet, and desktop screens.
+
+    Use the attached image as the reference for the UI and calculation logic. Integrate this functionality into my existing project
+  without
+    breaking the current features, database structure, or
+
+    Before implementing, inspect the existing codebase, its and data models, and reuse the currentarchitecture. Do not create duplicate
+  modules or hardcode values that should be configurabl
+
+    Expected calculation:
+    Total Cost = ₹442.00
+    Loss (10%) = ₹44.20
+    Fabric Base Cost = ₹486.20                                                                                                            
+    Important: The image shows ₹486.40, but the listed ras equals ₹44.20 and the correct total is ₹486.20.Preserve the calculation formula and flag the discrepancy for confirmation.

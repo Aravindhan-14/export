@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#1f3a5f">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data: blob: https:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline' https://www.gstatic.com https://www.googletagmanager.com; style-src 'unsafe-inline'; img-src 'self' data: blob: https:; connect-src https://*.googleapis.com https://*.firebaseio.com https://*.google-analytics.com https://*.analytics.google.com https://*.googletagmanager.com wss://*.firebaseio.com wss://*.googleapis.com; frame-src https://exports-14e94.firebaseapp.com; object-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <title>Sports Pro — Costing &amp; Profitability</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231f3a5f'/%3E%3Ctext x='16' y='21' font-family='Arial' font-size='13' font-weight='700' fill='white' text-anchor='middle'%3ESP%3C/text%3E%3C/svg%3E">
@@ -185,6 +185,31 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
 .sumrow.big{font-size:18px;font-weight:800;color:var(--brand)}
 .sec-total{font-weight:700;font-variant-numeric:tabular-nums}
 
+/* fabric rate build-up (material / process costing) */
+.fb-h{margin:2px 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+.fb-off{display:flex;gap:10px 14px;align-items:center;justify-content:space-between;flex-wrap:wrap;padding:12px;border:1px dashed var(--border-strong);border-radius:8px;margin-bottom:16px}
+.fb-acts{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 12px}
+.fb-table .fb-rate{width:130px} .fb-table .fb-del{width:44px}
+.fb-sum{max-width:440px;margin:0 0 18px auto;padding:10px 14px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2)}
+.fb-sum .sumrow{align-items:center} .fb-sum label{font-weight:400}
+.fb-inp input{width:130px;text-align:right}
+.inp.invalid{border-color:var(--bad);background:#fffafa}
+.fb-src{display:flex;gap:6px 16px;flex-wrap:wrap;margin-top:10px;font-size:13px}
+@media (max-width: 560px){
+  .fb-table thead{display:none}
+  .fb-table,.fb-table tbody,.fb-table tfoot{display:block;width:100%}
+  .fb-table tbody tr{display:grid;grid-template-columns:minmax(0,1fr) 110px auto;gap:6px 8px;padding:10px 8px;border-bottom:1px solid var(--border)}
+  .fb-table tbody td{border:0;padding:0;width:auto!important}
+  .fb-table td.fb-n{display:none}
+  .fb-table td[data-th]::before{content:attr(data-th);display:block;font-size:11px;color:var(--muted);margin-bottom:2px}
+  .fb-table td[data-th="Material / Process"]{grid-column:1/-1}
+  .fb-table td.fb-del{align-self:end}
+  .fb-table tfoot tr{display:flex;justify-content:space-between}
+  .fb-table tfoot td:empty{display:none}
+  .fb-sum{max-width:none}
+  .fb-inp input{width:110px}
+}
+
 /* chart */
 .chart svg{width:100%;height:auto;display:block}
 .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:8px}
@@ -350,7 +375,47 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
   ];
 
   const Calc = {
-    FORMULA_VERSION: 'SP-COST-1.0',
+    FORMULA_VERSION: 'SP-COST-1.1',
+
+    /** Fabric rate build-up (material / process costing for one fabric row):
+        Total cost       = Σ process rates                     (442.00)
+        Loss amount      = Total cost × Loss % / 100, 2 dp     (442.00 × 10% = 44.20)
+        Fabric base cost = Total cost + Loss amount            (486.20)
+        Taken / Pc       = manual rate (optional); Difference = Taken − Base cost.
+        Applied rate     = base cost, or Taken / Pc when rateSource = 'TAKEN'.
+        NOTE: the reference sheet prints 486.40 for these inputs; 486.20 is the arithmetic
+        result and awaits client confirmation (Settings → Costing). */
+    fabricBuild(build) {
+      const b = build || {};
+      const errors = [];
+      const processes = (b.processes || []).map((p, i) => {
+        const label = p.material || `Process ${i + 1}`;
+        let rate = D(0);
+        if (!Dec.valid(p.rate === '' || p.rate == null ? '0' : p.rate)) errors.push(`${label}: rate must be a valid number`);
+        else { rate = D(p.rate); if (rate.isNeg()) errors.push(`${label}: rate must not be negative`); }
+        return Object.assign({}, p, { rate: rate.toString() });
+      });
+      if (!processes.length) errors.push('Add at least one material / process to the fabric build-up');
+      const total = sum(processes, (p) => D(p.rate)).round(RULES.money);
+      let lossPct = D(0);
+      if (!Dec.valid(b.lossPct === '' || b.lossPct == null ? '0' : b.lossPct)) errors.push('Loss % must be a valid number');
+      else { lossPct = D(b.lossPct); if (lossPct.isNeg() || lossPct.gt(100)) errors.push('Loss % must be between 0 and 100'); }
+      const loss = total.pct(lossPct).round(RULES.money);
+      const base = total.add(loss);
+      let taken = null;
+      if (b.takenPc !== '' && b.takenPc != null) {
+        if (!Dec.valid(b.takenPc)) errors.push('Taken / Pc must be a valid number');
+        else { taken = D(b.takenPc).round(RULES.money); if (taken.isNeg()) errors.push('Taken / Pc must not be negative'); }
+      }
+      const rateSource = b.rateSource === 'TAKEN' ? 'TAKEN' : 'BASE';
+      if (rateSource === 'TAKEN' && taken === null) errors.push('Enter Taken / Pc, or use the fabric base cost');
+      const applied = rateSource === 'TAKEN' && taken !== null ? taken : base;
+      return {
+        processes, total: total.toString(), lossPct: lossPct.toString(), loss: loss.toString(), baseCost: base.toString(),
+        takenPc: taken ? taken.toString() : null, difference: taken ? taken.sub(base).toString() : null,
+        rateSource, appliedRate: applied.toString(), errors,
+      };
+    },
 
     /** Expected Qty = Expected Qty per Combo × Expected Number of Combos */
     expectedQty(perCombo, combos) {
@@ -360,10 +425,13 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     },
 
     /** Costing row: Amount/pc = Qty (consumption) × Rate × (1 + Allowance% / 100), rounded 2 dp.
-        Fabric allowance defaults to the workbook loss of 5% (verified on every fabric row). */
+        Fabric allowance defaults to the workbook loss of 5% (verified on every fabric row).
+        A fabric row with a rate build-up uses the build-up's applied rate. */
     lineAmount(line) {
       const qty = D(line.qty === '' || line.qty == null ? 1 : line.qty);
-      const rate = D(line.rate);
+      let rate;
+      if (line.build) { const fb = Calc.fabricBuild(line.build); if (fb.errors.length) throw new Error(fb.errors[0]); rate = D(fb.appliedRate); }
+      else rate = D(line.rate);
       const allow = D(line.allowancePct || 0);
       if (qty.isNeg() || rate.isNeg() || allow.isNeg()) throw new Error('Consumption, rate and allowance must not be negative');
       return qty.mul(rate).mul(D(1).add(allow.div(100))).round(RULES.money);
@@ -642,6 +710,17 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
       numberFormat: 'western',
       poolPrefix: 'BGPL',
       fabricLossPct: '5',
+      // Default material / process template for a new fabric rate build-up (reference costing sheet).
+      fabricBuild: {
+        lossPct: '10', confirmed: false,
+        processes: [
+          { material: 'Yarn', spec: '30s CMB', rate: '300' },
+          { material: 'Knitting', spec: 'Jersey', rate: '12' },
+          { material: 'Dyeing', spec: 'Average Rate', rate: '100' },
+          { material: 'Stendering', spec: '', rate: '20' },
+          { material: 'Compacting', spec: 'OP', rate: '10' },
+        ],
+      },
       defaultPercentages: [{ name: 'REJ + OH + COMM + MARGIN', pct: '40', basis: 'ITEMS' }],
       units: ['kg', 'm', 'yd', 'pc', 'pair', 'set', 'dozen', 'gross', 'cone', 'roll'],
       productTypes: ['T-Shirt', 'Polo', 'Hoody', 'Sweatshirt', 'Pant', 'Shorts', 'Jacket', 'Romper', 'Other'],
@@ -681,7 +760,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     COLLS.forEach((c) => { if (!Array.isArray(db[c])) db[c] = []; });
     const def = defaultSettings();
     db.settings = Object.assign(def, db.settings || {});
-    ['variance', 'shipment', 'pool', 'attachments'].forEach((k) => (db.settings[k] = Object.assign(def[k], db.settings[k] || {})));
+    ['variance', 'shipment', 'pool', 'attachments', 'fabricBuild'].forEach((k) => (db.settings[k] = Object.assign(def[k], db.settings[k] || {})));
     Object.keys(DEFAULT_ROLE_PERMS).forEach((r) => { if (!db.settings.rolePerms[r]) db.settings.rolePerms[r] = DEFAULT_ROLE_PERMS[r].slice(); });
     db.meta.seq = db.meta.seq || {};
     return db;
@@ -756,6 +835,91 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     };
   }
 
+  /** Firestore mirror adapter — saves the whole database to Firebase (Cloud Firestore)
+      AND to localStorage. Local storage is the offline cache and the fallback when
+      Firebase is unreachable, so the app keeps working with no network. The entire
+      database is stored as one JSON string in a single document to avoid Firestore's
+      nested-array / field-name limits; optimistic locking uses meta.rev, exactly like
+      the other adapters. `io` carries the Firestore SDK functions (passed from the
+      Firebase module so this classic script needs no imports of its own). */
+  function FirestoreMirrorAdapter(io) {
+    const LS = LocalStorageAdapter;
+    // Never let a hanging Firebase call freeze the app: every network call settles within `ms`.
+    const T = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => { const e = new Error('Firebase timed out'); e.code = 'TIMEOUT'; rej(e); }, ms))]);
+    const adapter = {
+      io, lastError: null, connected: false,
+      async load() {
+        let remote;
+        try {
+          const snap = await T(io.getDoc(io.docRef), 7000);
+          remote = snap.exists() ? JSON.parse(snap.data().json) : null;
+          this.connected = true; this.lastError = null;
+        } catch (e) {
+          this.connected = false; this.lastError = e && e.message;
+          return LS.load(); // Firebase blocked/offline → use local cache
+        }
+        if (remote) { try { localStorage.setItem(LS.key, JSON.stringify(remote)); } catch (e) {} return remote; }
+        // Firebase reachable but empty → push the existing local database up (first-time migration)
+        const local = await LS.load();
+        if (local) { try { await this._put(local); } catch (e) { this.lastError = e && e.message; } }
+        return local;
+      },
+      async _put(db) {
+        await T(io.setDoc(io.docRef, { json: JSON.stringify(db), rev: db.meta.rev, updatedAt: io.serverTimestamp() }), 7000);
+      },
+      async save(db, expectedRev) {
+        await LS.save(db, expectedRev); // local first: never lose data, works offline
+        try {
+          await T(io.runTransaction(io.db, async (tx) => {
+            const snap = await tx.get(io.docRef);
+            if (snap.exists() && expectedRev !== null && snap.data().rev !== expectedRev) { const e = new Error('conflict'); e.code = 'CONFLICT'; throw e; }
+            tx.set(io.docRef, { json: JSON.stringify(db), rev: db.meta.rev, updatedAt: io.serverTimestamp() });
+          }), 8000);
+          this.connected = true; this.lastError = null;
+        } catch (e) {
+          if (e.code === 'CONFLICT') throw e; // let Store reload the newer Firebase copy
+          this.connected = false; this.lastError = e && e.message;
+          if (G.console) console.warn('Firebase save failed — kept in local storage:', e && e.message);
+        }
+      },
+    };
+    return adapter;
+  }
+  // Resolved by the Firebase module at the end of the page with { adapter } or null.
+  G.SP = G.SP || {};
+  G.SP.firebaseReady = new Promise((res) => { G.SP._resolveFirebase = res; });
+  /** Firebase-only adapter: Cloud Firestore is the single source of truth. localStorage is NEVER
+      used as a store — it is only read once to migrate existing on-device data up to Firebase.
+      If Firestore is unreachable, load()/save() throw so the app can show a clear "connect
+      Firebase" screen instead of silently keeping data on the device. */
+  function FirestoreAdapter(io) {
+    const T = (pr, ms) => Promise.race([pr, new Promise((_, rej) => setTimeout(() => { const e = new Error('Firebase did not respond — check the connection and that Cloud Firestore is enabled.'); e.code = 'TIMEOUT'; rej(e); }, ms))]);
+    return {
+      io, connected: false, lastError: null, firebaseOnly: true,
+      async load() {
+        const snap = await T(io.getDoc(io.docRef), 8000);
+        this.connected = true; this.lastError = null;
+        if (snap.exists()) return JSON.parse(snap.data().json);
+        // one-time migration: if this device has real data from before, move it into Firebase
+        let local = null; try { local = JSON.parse(localStorage.getItem(LocalStorageAdapter.key) || 'null'); } catch (e) {}
+        const hasData = local && ((local.buyers && local.buyers.length) || (local.styles && local.styles.length) || (local.costings && local.costings.length) || (local.pools && local.pools.length));
+        if (hasData) { await this._put(local); return local; }
+        return null;
+      },
+      async _put(db) { await T(io.setDoc(io.docRef, { json: JSON.stringify(db), rev: db.meta.rev, updatedAt: io.serverTimestamp() }), 8000); },
+      async save(db, expectedRev) {
+        await T(io.runTransaction(io.db, async (tx) => {
+          const snap = await tx.get(io.docRef);
+          if (snap.exists() && expectedRev !== null && snap.data().rev !== expectedRev) { const e = new Error('conflict'); e.code = 'CONFLICT'; throw e; }
+          tx.set(io.docRef, { json: JSON.stringify(db), rev: db.meta.rev, updatedAt: io.serverTimestamp() });
+        }), 9000);
+        this.connected = true; this.lastError = null;
+      },
+    };
+  }
+  G.SP.FirestoreMirrorAdapter = FirestoreMirrorAdapter;
+  G.SP.FirestoreAdapter = FirestoreAdapter;
+
   /* ---------------- Store ---------------- */
   const Store = {
     db: null, user: null, adapter: null, listeners: new Set(), _chain: Promise.resolve(), channel: null,
@@ -764,11 +928,14 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
       const loaded = await adapter.load();
       this.db = migrate(loaded || emptyDb());
       if (!loaded) await adapter.save(this.db, null);
-      if (adapter === LocalStorageAdapter && this.db.meta.adminReset !== 1) {
-        // one-time reset: remove all existing logins and keep only the built-in administrator
+      // Built-in owner administrator — credentials are fixed in code so this login always works
+      // (email: sekar@balajigarments.in). Works with Firebase storage too.
+      const OWNER = { id: 'admin-sekar', name: 'Sekar', email: 'sekar@balajigarments.in', role: 'ADMIN', active: true, passwordHash: '529213ea29b3070b8a2d391382082ed351b2e19edbb351a733e3c4373146cf30', salt: '825ac60c1a538c2e4e489e2c222d6f4d', createdAt: now(), failed: 0 };
+      const existing = this.db.users.find((u) => u.email === OWNER.email);
+      if (!existing || existing.passwordHash !== OWNER.passwordHash || existing.salt !== OWNER.salt || !existing.active || existing.role !== 'ADMIN') {
         const prevRev = this.db.meta.rev;
-        this.db.users = [{ id: 'admin-builtin', name: 'Administrator', email: 'admin@sportspro.local', role: 'ADMIN', active: true, passwordHash: 'f93723c6b065e4c6e9fb8345a5a9575d80fe98d9092d1bffef6e8baef7b143b6', salt: '30e91e0c203855b0fcd19dcd1de54a73', createdAt: now(), failed: 0 }];
-        this.db.meta.adminReset = 1;
+        if (existing) { Object.assign(existing, { passwordHash: OWNER.passwordHash, salt: OWNER.salt, active: true, role: 'ADMIN', failed: 0, lockedUntil: null }); }
+        else { this.db.users.push(OWNER); }
         this.db.meta.rev = prevRev + 1;
         await adapter.save(this.db, loaded ? prevRev : null);
       }
@@ -822,8 +989,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     return { salt, hash: hex(bits) };
   }
   function validatePassword(p) {
-    if (!p || p.length < 8) fail('Password must be at least 8 characters', 'password');
-    if (!/[A-Za-z]/.test(p) || !/\d/.test(p)) fail('Password must contain letters and numbers', 'password');
+    if (!p || p.length < 6) fail('Password must be at least 6 characters', 'password');
   }
   const Session = {
     key: 'sp-session',
@@ -1016,6 +1182,15 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
       if (!['POOL', 'STYLE'].includes(v.scope)) fail('Invalid variance scope');
       s.variance = { method: v.method, scope: v.scope, categories: (v.categories || []).slice(), approved: !!v.approved };
     }
+    if ('fabricBuild' in patch) {
+      const fb = patch.fabricBuild;
+      s.fabricBuild = {
+        lossPct: dec(fb.lossPct, 'fbLossPct', 'Fabric build-up loss %', { max: 100 }),
+        confirmed: !!fb.confirmed,
+        processes: (fb.processes || []).map((p, i) => ({ material: reqStr(p.material, 'fbProc', `Process row ${i + 1}: material / process`, 80), spec: optStr(p.spec, 120), rate: dec(p.rate, 'fbProc', `${p.material || 'Process row ' + (i + 1)}: rate`, { min: 0 }) })),
+      };
+      if (!s.fabricBuild.processes.length) fail('Add at least one material / process to the default template', 'fbProc');
+    }
     if ('shipment' in patch) s.shipment = { maxExcessPct: dec(patch.shipment.maxExcessPct, 'maxExcessPct', 'Max excess %'), requireFinalForClosure: !!patch.shipment.requireFinalForClosure };
     if ('pool' in patch) s.pool = { allowPartialAllocation: !!patch.pool.allowPartialAllocation };
     if ('attachments' in patch) s.attachments = { enabled: !!patch.attachments.enabled, maxKb: int(patch.attachments.maxKb, 'maxKb', 'Max attachment size', { min: 50 }) };
@@ -1116,11 +1291,19 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     if (db.styles.some((s) => s.id !== data.id && s.buyerId === buyer.id && lc(s.season) === lc(season) && lc(s.styleRef) === lc(styleRef))) fail(`Style ${styleRef} already exists for ${buyer.name} / ${season}`, 'styleRef');
     const perCombo = int(data.qtyPerCombo, 'qtyPerCombo', 'Expected qty per combo', { required: false }) || 0;
     const combos = int(data.combos, 'combos', 'Expected number of combos', { required: false }) || 0;
+    // Expected total quantity is entered manually (client correction). Falls back to the legacy
+    // per-combo calculation for CSV imports / seed data, and keeps the existing value if an edit
+    // leaves the field blank — editing never destroys the stored quantity.
+    let expectedQty;
+    if (str(data.expectedTotalQty) !== '') expectedQty = int(data.expectedTotalQty, 'expectedTotalQty', 'Expected total quantity', { min: 0 });
+    else if (perCombo || combos) expectedQty = Calc.expectedQty(perCombo, combos);
+    else if (data.id) { const ex = byId(db, 'styles', data.id); expectedQty = ex ? (ex.expectedQty || 0) : 0; }
+    else fail('Expected total quantity is required', 'expectedTotalQty');
     const sizes = (Array.isArray(data.sizes) ? data.sizes : str(data.sizes).split(',')).map(str).filter(Boolean);
     if (new Set(sizes.map(lc)).size !== sizes.length) fail('Duplicate sizes in size set', 'sizes');
     const fields = {
       buyerId: buyer.id, season, styleRef, description: optStr(data.description, 300), productType: optStr(data.productType, 80),
-      sizeRange: optStr(data.sizeRange, 80), sizes, qtyPerCombo: perCombo, combos, expectedQty: Calc.expectedQty(perCombo, combos),
+      sizeRange: optStr(data.sizeRange, 80), sizes, qtyPerCombo: perCombo, combos, expectedQty,
       quoteDate: date(data.quoteDate, 'quoteDate', 'Quote date', false), status: ['ACTIVE', 'DRAFT', 'ARCHIVED'].includes(data.status) ? data.status : 'ACTIVE',
       remarks: optStr(data.remarks),
     };
@@ -1146,19 +1329,32 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
   });
 
   /* ---------- Costing ---------- */
+  function cleanBuild(b, field, label) {
+    const out = {
+      processes: (b.processes || []).map((p, j) => ({ id: p.id || uid(), material: reqStr(p.material, field, `${label}: build-up row ${j + 1} material / process`, 80), spec: optStr(p.spec, 120), rate: dec(p.rate, field, `${label}: ${p.material || 'build-up row ' + (j + 1)} rate`, { min: 0 }) })),
+      lossPct: dec(b.lossPct, field, `${label}: build-up loss %`, { max: 100 }),
+      takenPc: dec(b.takenPc, field, `${label}: Taken / Pc`, { required: false }) || '',
+      rateSource: b.rateSource === 'TAKEN' ? 'TAKEN' : 'BASE',
+    };
+    const r = Calc.fabricBuild(out);
+    if (r.errors.length) fail(`${label}: ${r.errors[0]}`, field);
+    return out;
+  }
   function cleanLines(db, lines) {
     const cats = categories(db).map((c) => c.key);
     return (lines || []).map((l, i) => {
       if (!cats.includes(l.category)) fail(`Row ${i + 1}: unknown category`);
       const label = `${catLabel(l.category, db)} row ${i + 1}`;
+      const build = l.category === 'FABRIC' && l.build ? cleanBuild(l.build, 'line' + i, label) : null;
       const out = {
         id: l.id || uid(), category: l.category, name: reqStr(l.name, 'line' + i, `${label}: name`),
         description: optStr(l.description, 300), composition: optStr(l.composition, 200), gsm: optStr(l.gsm, 20), colour: optStr(l.colour, 80),
         unit: optStr(l.unit, 20), rateUnit: optStr(l.rateUnit, 20),
         qty: dec(l.qty === '' || l.qty == null ? '1' : l.qty, 'line' + i, `${label}: consumption/qty`, { min: 0 }),
-        rate: dec(l.rate, 'line' + i, `${label}: rate`, { min: 0 }),
+        rate: build ? Calc.fabricBuild(build).appliedRate : dec(l.rate, 'line' + i, `${label}: rate`, { min: 0 }),
         allowancePct: dec(l.allowancePct || '0', 'line' + i, `${label}: allowance %`, { min: 0 }),
         remarks: optStr(l.remarks, 500),
+        build,
       };
       if (out.unit && !db.settings.units.includes(out.unit)) fail(`${label}: unit "${out.unit}" is not a configured unit`);
       if (out.rateUnit && !db.settings.units.includes(out.rateUnit)) fail(`${label}: rate unit "${out.rateUnit}" is not a configured unit`);
@@ -1220,6 +1416,22 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     recompute(db, v); db.costings.push(v);
     const st = byId(db, 'styles', v.styleId);
     audit(db, 'SAVE_AS', 'Costing', Object.assign({ code: `${st.styleRef} ${v.label}` }, v), null, `Copied from ${src.label}`);
+    return v;
+  });
+  /** Copy Data: create a new DRAFT costing on `targetStyleId` populated from an existing costing.
+      The source is never changed, the copy gets its own version number and starts as Draft. */
+  svc.newCostingFromCopy = (targetStyleId, sourceId) => mut('costing.edit', (db) => {
+    const st = must(db, 'styles', targetStyleId, 'Style');
+    if (st.status === 'ARCHIVED') fail('Style is archived');
+    const src = must(db, 'costings', sourceId, 'Source costing');
+    const n = db.costings.filter((c) => c.styleId === targetStyleId).length;
+    const v = clone(src);
+    Object.assign(v, { id: uid(), styleId: targetStyleId, versionNo: n + 1, label: n === 0 ? 'Original' : `Revised ${n}`, parentId: null, status: 'DRAFT', createdBy: Store.user.name, createdAt: now(), updatedAt: now(), updatedBy: null, approvedAt: null, approvedBy: null });
+    v.lines = v.lines.map((l) => Object.assign({}, l, { id: uid() }));
+    v.percentages = v.percentages.map((p) => Object.assign({}, p, { id: uid() }));
+    recompute(db, v); db.costings.push(v);
+    const srcStyle = byId(db, 'styles', src.styleId);
+    audit(db, 'COPY_DATA', 'Costing', Object.assign({ code: `${st.styleRef} ${v.label}` }, v), null, `Copied data from ${srcStyle ? srcStyle.styleRef + ' ' : ''}${src.label}`);
     return v;
   });
   function approveInDb(db, v) {
@@ -2678,7 +2890,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
           { name: 'password', label: 'Password', type: 'password', required: true, span: 's12', autocomplete: 'current-password' },
         ])}
         <button class="btn primary" style="width:100%;margin-top:16px" type="submit">${setup ? 'Create account' : 'Sign in'}</button>
-        <p class="small" style="margin-top:14px">Data is stored in this browser (localStorage). Use Settings → Data → Backup regularly.</p>
+        <p class="small" style="margin-top:14px">Your data is stored securely in Firebase (cloud) and syncs across your devices.</p>
       </form></div>`;
       const f = $('#authf');
       f.onsubmit = (e) => {
@@ -2890,7 +3102,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
         { key: 'styleRef', label: 'Style ref', wrap: true, render: (r) => `<b>${esc(r.styleRef)}</b>${testTag(r)}` },
         { key: 'buyer', label: 'Buyer', value: (r) => H.buyer(r.buyerId).name, wrap: true }, { key: 'season', label: 'Season' },
         { key: 'description', label: 'Description', wrap: true, hideSm: true }, { key: 'productType', label: 'Product', hideSm: true }, { key: 'sizeRange', label: 'Size range', hideSm: true },
-        { key: 'expectedQty', label: 'Expected qty', num: true, render: (r) => `${Fmt.qty(r.expectedQty)}<div class="small faint">${r.qtyPerCombo} × ${r.combos}</div>`, exportValue: (r) => r.expectedQty },
+        { key: 'expectedQty', label: 'Expected qty', num: true, render: (r) => Fmt.qty(r.expectedQty), exportValue: (r) => r.expectedQty },
         { key: 'quoteDate', label: 'Quote date', render: (r) => fmtDate(r.quoteDate), hideSm: true }, { key: 'status', label: 'Status', render: (r) => status(r.status) },
       ],
       actions: (r) => act('view', '', '', 'eye', false, 'View') + guard('costing.view', act('cost', 'Costing')) + guard('styles.edit', act('edit', '', '', 'edit', false, 'Edit')) + guard('styles.delete', act('arch', r.status === 'ARCHIVED' ? 'Restore' : 'Archive') + act('del', '', 'danger', 'trash', false, 'Delete')),
@@ -2921,20 +3133,17 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
         { name: 'sizeRange', label: 'Size range', span: 's4', placeholder: 'e.g. 0M - 24M' },
         { name: 'sizeSet', label: 'Size set template', type: 'select', options: st.sizeSets.map((x, i) => ({ value: i, label: x.name })), placeholder: '— Apply a template —', span: 's4' },
         { name: 'sizes', label: 'Sizes (comma separated)', span: 's4', help: 'Used for size-wise order quantities' },
-        { name: 'qtyPerCombo', label: 'Expected qty per combo', type: 'int', span: 's3' }, { name: 'combos', label: 'Expected number of combos', type: 'int', span: 's3' },
-        { name: 'expected', label: 'Expected total qty', type: 'static', span: 's3', html: '<b id="expQ">0</b> pcs' },
+        { name: 'expectedTotalQty', label: 'Expected total quantity', type: 'int', required: true, span: 's3', help: 'Enter the expected total quantity manually' },
         { name: 'quoteDate', label: 'Quote date', type: 'date', span: 's3' },
         { name: 'remarks', label: 'Remarks', type: 'textarea', span: 's12' },
         { name: 'img', label: 'Style image', type: 'html', html: '<div id="imgBox"></div>' },
-      ], s ? Object.assign({}, s, { sizes: (s.sizes || []).join(', ') }) : { status: 'ACTIVE' }) + `<datalist id="seasonList">${H.seasonOpts().map((o) => `<option value="${esc(o.value)}">`).join('')}</datalist><datalist id="ptList">${st.productTypes.map((p) => `<option value="${esc(p)}">`).join('')}</datalist>`,
+      ], s ? Object.assign({}, s, { sizes: (s.sizes || []).join(', '), expectedTotalQty: s.expectedQty }) : { status: 'ACTIVE' }) + `<datalist id="seasonList">${H.seasonOpts().map((o) => `<option value="${esc(o.value)}">`).join('')}</datalist><datalist id="ptList">${st.productTypes.map((p) => `<option value="${esc(p)}">`).join('')}</datalist>`,
       actions: [{ label: 'Cancel' }, { label: 'Save', cls: 'primary', onClick: async (mm) => {
         const v = read(mm.el); if (st.imageStorage === 'url') { const u = $('#imgUrl', mm.el); image = u && u.value.trim() ? u.value.trim() : image && image.startsWith('data:') ? image : null; if (image && !/^(https?:|data:)/.test(image)) throw new AppError('Image URL must start with http(s)://'); }
         await svc.saveStyle(Object.assign(v, { id: s && s.id, image, sizes: v.sizes.split(',') })); toast('Style saved', 'ok');
       } }],
     });
     const el = m.el;
-    const upd = () => { const a = Number($('[name=qtyPerCombo]', el).value || 0), b = Number($('[name=combos]', el).value || 0); $('#expQ', el).textContent = Number.isInteger(a) && Number.isInteger(b) && a >= 0 && b >= 0 ? Fmt.qty(a * b) : 'invalid'; };
-    $('[name=qtyPerCombo]', el).oninput = upd; $('[name=combos]', el).oninput = upd; upd();
     $('[name=sizeSet]', el).onchange = (e) => { const x = st.sizeSets[e.target.value]; if (x) $('[name=sizes]', el).value = x.sizes.join(', '); };
     const drawImg = () => {
       $('#imgBox', el).innerHTML = imgHtml();
@@ -2951,7 +3160,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
       title: `${s.styleRef} (${s.code})`, size: 'lg',
       body: `<div style="display:flex;gap:16px;flex-wrap:wrap"><div class="imgprev">${s.image ? `<img src="${esc(s.image)}" alt="">` : 'No image'}</div><dl class="dl" style="flex:1;min-width:240px">
         <dt>Buyer</dt><dd>${esc(H.buyer(s.buyerId).name)}</dd><dt>Season</dt><dd>${esc(s.season)}</dd><dt>Description</dt><dd>${esc(s.description || '—')}</dd><dt>Product type</dt><dd>${esc(s.productType || '—')}</dd><dt>Size range</dt><dd>${esc(s.sizeRange || '—')}</dd><dt>Sizes</dt><dd>${esc((s.sizes || []).join(', ') || '—')}</dd>
-        <dt>Expected qty</dt><dd>${s.qtyPerCombo} per combo × ${s.combos} combos = <b>${Fmt.qty(s.expectedQty)}</b></dd><dt>Quote date</dt><dd>${fmtDate(s.quoteDate)}</dd><dt>Status</dt><dd>${status(s.status)}${testTag(s)}</dd><dt>Remarks</dt><dd>${esc(s.remarks || '—')}</dd></dl></div>
+        <dt>Expected total qty</dt><dd><b>${Fmt.qty(s.expectedQty)}</b></dd><dt>Quote date</dt><dd>${fmtDate(s.quoteDate)}</dd><dt>Status</dt><dd>${status(s.status)}${testTag(s)}</dd><dt>Remarks</dt><dd>${esc(s.remarks || '—')}</dd></dl></div>
         <h3 style="margin:16px 0 6px">History</h3><p><a href="#/costing?style=${s.id}">${cv.length} costing version(s)</a> · <a href="#/quotes?style=${s.id}">${qt.length} quote(s)</a> · <a href="#/confirmations?style=${s.id}">${ln.length} order line(s)</a></p>`,
       actions: [{ label: 'Close' }].concat(can('styles.edit') ? [{ label: 'Edit', cls: 'primary', onClick: (m) => { m.close(); editStyle(s); return false; } }] : []),
     });
@@ -2962,12 +3171,15 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     view.innerHTML = pageHead('Costing Inputs', 'Costing versions per style. Approved versions are locked; use “Save As” to create a revision.', guard('costing.edit', btn('New costing', 'id="newC"', 'primary', 'plus'))) +
       `<div class="notice info">Formula ${esc(Calc.FORMULA_VERSION)}: row amount = qty/consumption × rate × (1 + allowance%). Fabric loss default ${esc(Store.db.settings.fabricLossPct)}% (verified against the workbook). Total INR = items total + overall %; foreign price = total INR ÷ INR per unit.</div>
       <div class="card"><div class="bd p0" id="ct"></div></div>`;
+    const mainFabric = (r) => { const f = (r.lines || []).find((l) => l.category === 'FABRIC'); return f ? ((f.name || '') + (f.gsm ? ' / ' + f.gsm + ' GSM' : '')).trim() || '—' : '—'; };
     table($('#ct', view), {
       id: 'costings', exportName: 'costing-versions', rows: () => Store.db.costings, sort: { key: 'updatedAt', dir: 'desc' },
       initialFilters: { styleId: q.style || '' },
       filters: [{ key: 'styleId', label: 'Style', options: () => H.styleOpts(null, true) }, { key: 'buyer', label: 'Buyer', options: H.allBuyerOpts, get: (r) => H.style(r.styleId).buyerId }, { key: 'season', label: 'Season', options: H.seasonOpts, get: (r) => H.style(r.styleId).season }, { key: 'status', label: 'Status', options: ['DRAFT', 'APPROVED'] }],
       columns: [
         { key: 'style', label: 'Style', value: (r) => H.style(r.styleId).styleRef, render: (r) => `<b>${esc(H.style(r.styleId).styleRef)}</b>${testTag(H.style(r.styleId))}<div class="small muted">${esc(H.buyer(H.style(r.styleId).buyerId).name)} · ${esc(H.style(r.styleId).season)}</div>` },
+        { key: 'desc', label: 'Description', hideSm: true, value: (r) => H.style(r.styleId).description || '', render: (r) => esc(H.style(r.styleId).description || '—') },
+        { key: 'fabric', label: 'Main fabric', hideSm: true, value: (r) => mainFabric(r), render: (r) => esc(mainFabric(r)) },
         { key: 'label', label: 'Version', render: (r) => `${esc(r.label)} <span class="faint small">v${r.versionNo}</span>` },
         { key: 'status', label: 'Status', render: (r) => status(r.status) },
         { key: 'items', label: 'Items total', num: true, value: (r) => r.results.itemsTotal, render: (r) => Fmt.inr(r.results.itemsTotal) },
@@ -2986,8 +3198,18 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     });
     const nb = $('#newC', view);
     if (nb) nb.onclick = () => modal({
-      title: 'New costing', body: form([{ name: 'styleId', label: 'Style', type: 'select', search: true, options: H.styleOpts(), required: true, span: 's12', help: 'A new version is created (Original for the first costing, then Revised 1, 2…)' }], { styleId: q.style }),
-      actions: [{ label: 'Cancel' }, { label: 'Create', cls: 'primary', onClick: async (m) => { const v = read(m.el); if (!v.styleId) throw new AppError('Select a style', 'styleId'); const c = await svc.newCosting(v.styleId); App.go('costing/edit', { id: c.id }); } }],
+      title: 'New costing',
+      body: form([
+        { name: 'mode', label: 'How do you want to start?', type: 'select', placeholder: false, span: 's12', options: [{ value: 'new', label: 'Create New — blank costing inputs' }, { value: 'copy', label: 'Copy Data — copy an existing costing' }] },
+        { name: 'styleId', label: 'Style', type: 'select', search: true, options: H.styleOpts(), required: true, span: 's12', help: 'A new version is created (Original for the first costing, then Revised 1, 2…)' },
+        { name: 'sourceId', label: 'Copy from costing', type: 'select', search: true, span: 's12', options: Store.db.costings.slice().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map((c) => ({ value: c.id, label: `${H.style(c.styleId).styleRef} — ${c.label} (${c.status})` })), help: 'The copy becomes a new editable Draft; the original costing is never changed.' },
+      ], { styleId: q.style, mode: 'new' }),
+      onMount: (m) => { const toggle = () => { const copy = $('[name=mode]', m.el).value === 'copy'; const sf = $('[name=sourceId]', m.el).closest('.fld'); if (sf) sf.classList.toggle('hidden', !copy); }; $('[name=mode]', m.el).onchange = toggle; toggle(); },
+      actions: [{ label: 'Cancel' }, { label: 'Create', cls: 'primary', onClick: async (m) => {
+        const v = read(m.el); if (!v.styleId) throw new AppError('Select a style', 'styleId');
+        if (v.mode === 'copy') { if (!v.sourceId) throw new AppError('Select a costing to copy from', 'sourceId'); const c = await svc.newCostingFromCopy(v.styleId, v.sourceId); toast('Costing copied into a new draft', 'ok'); App.go('costing/edit', { id: c.id }); }
+        else { const c = await svc.newCosting(v.styleId); App.go('costing/edit', { id: c.id }); }
+      } }],
     });
   });
 
@@ -3007,15 +3229,16 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     const quotes = Store.db.quotes.filter((x) => x.costingId === v0.id);
     const siblings = Store.db.costings.filter((c) => c.styleId === v0.styleId).sort((a, b) => a.versionNo - b.versionNo);
     const unitSel = (l, f) => `<select class="cell" data-li="${l.id}" data-f="${f}" ${editable ? '' : 'disabled'}><option value=""></option>${units.map((u) => `<option${l[f] === u ? ' selected' : ''}>${esc(u)}</option>`).join('')}</select>`;
-    const inp = (l, f, cls, ph) => `<input class="cell ${cls || ''}" data-li="${l.id}" data-f="${f}" value="${esc(l[f] === undefined || l[f] === null ? '' : l[f])}" ${editable ? '' : 'readonly'} ${cls === 'num' ? 'inputmode="decimal"' : ''} placeholder="${esc(ph || '')}" aria-label="${esc(f)}">`;
+    const inp = (l, f, cls, ph, lock) => `<input class="cell ${cls || ''}" data-li="${l.id}" data-f="${f}" value="${esc(l[f] === undefined || l[f] === null ? '' : l[f])}" ${editable && !lock ? '' : 'readonly'} ${lock ? 'title="From the fabric rate build-up — open Details to change"' : ''} ${cls === 'num' ? 'inputmode="decimal"' : ''} placeholder="${esc(ph || '')}" aria-label="${esc(f)}">`;
+    const buildNote = (b) => { const r = Calc.fabricBuild(b); return `<div class="small faint">Build-up: base ${Fmt.inr(r.baseCost)}${r.takenPc ? ` · taken ${Fmt.inr(r.takenPc)}` : ''} → rate ${Fmt.inr(r.appliedRate)}</div>`; };
     const rowHtml = (l, i, n) => {
       const unitCols = l.category === 'FABRIC' || l.category === 'TRIMS';
       return `<tr data-row="${l.id}"><td class="faint small">${i + 1}</td>
-        <td style="min-width:170px">${inp(l, 'name', '', 'Name')}${l.category === 'FABRIC' && (l.composition || l.gsm || l.colour) ? `<div class="small faint">${esc([l.composition, l.gsm && l.gsm + ' GSM', l.colour].filter(Boolean).join(' · '))}</div>` : ''}</td>
+        <td style="min-width:170px">${inp(l, 'name', '', 'Name')}${l.category === 'FABRIC' && (l.composition || l.gsm || l.colour) ? `<div class="small faint">${esc([l.composition, l.gsm && l.gsm + ' GSM', l.colour].filter(Boolean).join(' · '))}</div>` : ''}${l.build ? buildNote(l.build) : ''}</td>
         ${l.category === 'FABRIC' ? '' : `<td style="min-width:140px" class="hide-sm">${inp(l, 'description', '', 'Description')}</td>`}
         <td style="width:110px">${inp(l, 'qty', 'num', '1')}</td>
         ${unitCols ? `<td style="width:90px">${unitSel(l, 'unit')}</td>` : ''}
-        <td style="width:110px">${inp(l, 'rate', 'num', '0.00')}</td>
+        <td style="width:110px">${inp(l, 'rate', 'num', '0.00', !!l.build)}</td>
         ${unitCols ? `<td style="width:90px">${unitSel(l, 'rateUnit')}</td>` : ''}
         <td style="width:80px">${inp(l, 'allowancePct', 'num', '0')}</td>
         <td class="num" style="width:100px"><b data-amt="${l.id}">—</b></td>
@@ -3124,26 +3347,98 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     };
     const lineDetail = (l) => {
       const isF = l.category === 'FABRIC';
+      const tpl = Store.db.settings.fabricBuild;
+      let b = l.build ? SP.clone(l.build) : null;
+      const newBuild = () => ({ processes: tpl.processes.map((p) => Object.assign({ id: SP.uid() }, p)), lossPct: tpl.lossPct, takenPc: '', rateSource: 'BASE' });
+      const buildHtml = () => {
+        if (!b) return `<div class="fb-off"><p class="small muted" style="margin:0">Enter the base rate directly below, or build it up from yarn and process rates (total + loss % = fabric base cost).</p>${editable ? `<button class="btn sm" type="button" id="fbOn">${ico('plus')}Build rate from materials &amp; processes</button>` : ''}</div>`;
+        const ro = editable ? '' : 'readonly';
+        return `<div class="table-wrap"><table class="t fb-table"><thead><tr><th>#</th><th>Material / Process</th><th>Type / Spec</th><th class="num">Rate (₹)</th><th></th></tr></thead><tbody>${b.processes.map((p, i) => `<tr data-bp="${p.id}"><td class="faint small fb-n">${i + 1}</td>
+            <td data-th="Material / Process"><input class="cell" data-bf="material" value="${esc(p.material)}" placeholder="e.g. Yarn" maxlength="80" aria-label="Material / process" ${ro}></td>
+            <td data-th="Type / Spec"><input class="cell" data-bf="spec" value="${esc(p.spec || '')}" placeholder="optional" maxlength="120" aria-label="Type / spec" ${ro}></td>
+            <td data-th="Rate (₹)" class="fb-rate"><input class="cell num" data-bf="rate" value="${esc(p.rate)}" inputmode="decimal" placeholder="0.00" aria-label="Rate" ${ro}></td>
+            <td class="fb-del">${editable ? `<button class="btn xs danger" type="button" data-bdel="${p.id}" aria-label="Remove row">${ico('trash')}</button>` : ''}</td></tr>`).join('')}</tbody>
+            <tfoot><tr><td colspan="3">Total cost</td><td class="num" id="fbTotal">—</td><td></td></tr></tfoot></table></div>
+          ${editable ? `<div class="fb-acts"><button class="btn sm" type="button" id="fbAdd">${ico('plus')}Add material / process</button><button class="btn sm danger" type="button" id="fbOff">Remove build-up</button></div>` : ''}
+          <div class="fb-sum">
+            <div class="sumrow"><span>Total cost</span><span class="num" id="fbTotal2">—</span></div>
+            <div class="sumrow"><label for="fbLoss">Loss %</label><span class="fb-inp"><input id="fbLoss" class="inp num" inputmode="decimal" value="${esc(b.lossPct)}" ${ro}></span></div>
+            <div class="sumrow"><span>Loss amount</span><span class="num" id="fbLossAmt">—</span></div>
+            <div class="sumrow total big"><span>Fabric base cost</span><span class="num" id="fbBase">—</span></div>
+            <div class="sumrow"><label for="fbTaken">Taken / Pc</label><span class="fb-inp"><input id="fbTaken" class="inp num" inputmode="decimal" value="${esc(b.takenPc || '')}" placeholder="optional" ${ro}></span></div>
+            <div class="sumrow"><span>Taken − base cost</span><span class="num" id="fbDiff">—</span></div>
+            <div class="fb-src" role="radiogroup" aria-label="Rate used in the costing input">
+              <label class="check"><input type="radio" name="fbSrc" value="BASE" ${b.rateSource !== 'TAKEN' ? 'checked' : ''} ${editable ? '' : 'disabled'}> Use fabric base cost</label>
+              <label class="check"><input type="radio" name="fbSrc" value="TAKEN" ${b.rateSource === 'TAKEN' ? 'checked' : ''} ${editable ? '' : 'disabled'}> Use Taken / Pc</label>
+            </div>
+            <div class="notice bad hidden" id="fbErr" role="alert" style="margin-top:8px"></div>
+            ${tpl.confirmed ? '' : '<div class="small muted" style="margin-top:6px">Base cost = total + loss. The reference sheet shows ₹486.40 for the default rows, but its own figures add up to ₹486.20, so the formula is still awaiting client confirmation.</div>'}
+          </div>`;
+      };
       modal({
         title: `${H.catLabel(l.category)} details`, size: 'lg',
-        body: form([
+        body: (isF ? `<h3 class="fb-h">Material / process costing</h3><div id="fbBox" data-noread></div><h3 class="fb-h">Costing input</h3>` : '') + form([
           { name: 'name', label: isF ? 'Fabric name' : 'Name', required: true, span: 's6' },
           { name: 'description', label: 'Description', span: 's6' },
           ...(isF ? [{ name: 'composition', label: 'Composition', span: 's4' }, { name: 'gsm', label: 'GSM', span: 's4' }, { name: 'colour', label: 'Colour', span: 's4' }] : []),
           { name: 'qty', label: QTY_LABEL[l.category] || 'Qty / basis', type: 'decimal', span: 's3', help: isF ? 'Weight per piece in the unit below' : 'Default 1' },
           { name: 'unit', label: 'Unit', type: 'select', options: units, span: 's3' },
-          { name: 'rate', label: isF ? 'Base rate' : 'Rate', type: 'decimal', required: true, span: 's3' },
+          { name: 'rate', label: isF ? 'Base rate' : 'Rate', type: 'decimal', required: true, span: 's3', help: isF ? 'Filled from the build-up when one is used' : '' },
           { name: 'rateUnit', label: 'Rate unit', type: 'select', options: units, span: 's3', help: 'Must match the consumption unit' },
-          { name: 'allowancePct', label: isF ? 'Loss %' : 'Allowance %', type: 'decimal', span: 's3' },
+          { name: 'allowancePct', label: isF ? 'Loss %' : 'Allowance %', type: 'decimal', span: 's3', help: isF ? 'Consumption loss on this row (separate from the build-up loss)' : '' },
           { name: 'calc', label: 'Calculated cost / pc', type: 'static', span: 's9', html: '<b id="dAmt">—</b> <span class="small muted">= qty × rate × (1 + %/100)</span>' },
           { name: 'remarks', label: 'Remarks', type: 'textarea', span: 's12' },
         ], l),
         onMount: (m) => {
-          const upd = () => { const v = read(m.el); try { if (!Calc.unitsCompatible(v)) throw new Error('Incompatible units'); $('#dAmt', m.el).textContent = Fmt.inr(Calc.lineAmount(v).toString()); } catch (e) { $('#dAmt', m.el).textContent = e.message; } };
-          m.el.addEventListener('input', upd); m.el.addEventListener('change', upd); upd();
-          if (!editable) $$('input,select,textarea', m.el).forEach((x) => (x.disabled = true));
+          const rateIn = $('[name=rate]', m.el);
+          const fbBox = $('#fbBox', m.el);
+          const bad = (x, { max } = {}) => x.trim() !== '' && (!SP.Dec.valid(x) || D(x).isNeg() || (max !== undefined && D(x).gt(max)));
+          const upd = () => {
+            let rateErr = null;
+            if (b) {
+              const r = Calc.fabricBuild(b);
+              $('#fbTotal', m.el).textContent = Fmt.inr(r.total); $('#fbTotal2', m.el).textContent = Fmt.inr(r.total);
+              $('#fbLossAmt', m.el).textContent = Fmt.inr(r.loss); $('#fbBase', m.el).textContent = Fmt.inr(r.baseCost);
+              $('#fbDiff', m.el).textContent = r.difference === null ? '—' : (D(r.difference).isNeg() ? '−' : '+') + Fmt.inr(D(r.difference).abs().toString());
+              $$('[data-bf=rate]', fbBox).forEach((i) => i.classList.toggle('invalid', bad(i.value)));
+              $('#fbLoss', m.el).classList.toggle('invalid', bad(b.lossPct || '', { max: 100 }));
+              $('#fbTaken', m.el).classList.toggle('invalid', bad(b.takenPc || ''));
+              const e = $('#fbErr', m.el); e.textContent = r.errors[0] || ''; e.classList.toggle('hidden', !r.errors.length);
+              if (r.errors.length) rateErr = r.errors[0];
+              rateIn.value = r.errors.length ? '' : D(r.appliedRate).toFixed(2);
+            }
+            rateIn.readOnly = !editable || !!b;
+            const v = read(m.el);
+            try { if (rateErr) throw new Error(rateErr); if (!Calc.unitsCompatible(v)) throw new Error('Incompatible units'); $('#dAmt', m.el).textContent = Fmt.inr(Calc.lineAmount(v).toString()); } catch (e) { $('#dAmt', m.el).textContent = e.message; }
+          };
+          const drawBuild = () => {
+            if (!fbBox) return;
+            fbBox.innerHTML = buildHtml();
+            const on = $('#fbOn', fbBox); if (on) on.onclick = () => { b = newBuild(); drawBuild(); };
+            const off = $('#fbOff', fbBox); if (off) off.onclick = () => { b = null; drawBuild(); };
+            const add = $('#fbAdd', fbBox); if (add) add.onclick = () => { b.processes.push({ id: SP.uid(), material: '', spec: '', rate: '' }); drawBuild(); const i = $$('[data-bf=material]', fbBox).pop(); i && i.focus(); };
+            $$('[data-bdel]', fbBox).forEach((x) => (x.onclick = () => { b.processes = b.processes.filter((p) => p.id !== x.dataset.bdel); drawBuild(); }));
+            $$('[data-bf]', fbBox).forEach((i) => (i.oninput = () => { b.processes.find((p) => p.id === i.closest('[data-bp]').dataset.bp)[i.dataset.bf] = i.value; }));
+            const ln = $('#fbLoss', fbBox); if (ln) ln.oninput = () => { b.lossPct = ln.value; };
+            const tk = $('#fbTaken', fbBox); if (tk) tk.oninput = () => { b.takenPc = tk.value; };
+            $$('[name=fbSrc]', fbBox).forEach((x) => (x.onchange = () => { b.rateSource = x.value; }));
+            upd();
+          };
+          // per-field handlers update the build state first; this bubbling listener then recalculates
+          m.el.addEventListener('input', upd); m.el.addEventListener('change', upd);
+          drawBuild();
+          if (!editable) $$('input,select,textarea,button[data-bdel]', m.el).forEach((x) => (x.disabled = true));
         },
-        actions: editable ? [{ label: 'Cancel' }, { label: 'Apply', cls: 'primary', onClick: (m) => { const v = read(m.el); if (!v.name.trim()) throw new AppError('Name is required', 'name'); delete v.calc; Object.assign(l, v); setDirty(true); draw(); } }] : [{ label: 'Close' }],
+        actions: editable ? [{ label: 'Cancel' }, { label: 'Apply', cls: 'primary', onClick: (m) => {
+          const v = read(m.el); if (!v.name.trim()) throw new AppError('Name is required', 'name'); delete v.calc;
+          if (b) {
+            const blank = b.processes.findIndex((p) => !String(p.material || '').trim());
+            if (blank >= 0) throw new AppError(`Build-up row ${blank + 1}: enter the material / process`);
+            const r = Calc.fabricBuild(b); if (r.errors.length) throw new AppError(r.errors[0]);
+            v.rate = r.appliedRate;
+          }
+          v.build = b; Object.assign(l, v); setDirty(true); draw();
+        } }] : [{ label: 'Close' }],
       });
     };
     const copyRows = (targetCat) => {
@@ -3172,6 +3467,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     const style = H.style(v.styleId);
     return `<div class="grid"><div><b>Style:</b> ${esc(style.styleRef)} — ${esc(style.description || '')}</div><div><b>Buyer:</b> ${esc(H.buyer(style.buyerId).name)}</div><div><b>Season:</b> ${esc(style.season)}</div><div><b>Version:</b> ${esc(v.label)} (${esc(v.status)})</div><div><b>Currency:</b> ${esc(v.currency)} @ ₹${Fmt.num(v.exchangeRate, 4)} ${v.rateDate ? '(' + fmtDate(v.rateDate) + ')' : ''}</div><div><b>Formula:</b> ${esc(v.formulaVersion)}</div></div>
       ${H.cats().filter((c) => v.lines.some((l) => l.category === c.key)).map((c) => `<h2>${esc(c.label)}</h2><table><thead><tr><th>Item</th><th>Details</th><th class="num">Qty</th><th class="num">Rate</th><th class="num">%</th><th class="num">Amount</th></tr></thead><tbody>${v.lines.filter((l) => l.category === c.key).map((l) => `<tr><td>${esc(l.name)}</td><td>${esc([l.description, l.composition, l.gsm && l.gsm + ' GSM', l.colour, l.unit].filter(Boolean).join(' · '))}</td><td class="num">${esc(l.qty)}</td><td class="num">${Fmt.num(l.rate)}</td><td class="num">${esc(l.allowancePct)}</td><td class="num">${Fmt.num(r.lineAmounts[l.id])}</td></tr>`).join('')}</tbody><tfoot><tr><td colspan="5">Subtotal</td><td class="num">${Fmt.inr(r.categories[c.key])}</td></tr></tfoot></table>`).join('')}
+      ${v.lines.filter((l) => l.build).map((l) => { const b = Calc.fabricBuild(l.build); return `<h2>Fabric rate build-up — ${esc(l.name)}</h2><table><thead><tr><th>Material / Process</th><th>Type / Spec</th><th class="num">Rate</th></tr></thead><tbody>${b.processes.map((x) => `<tr><td>${esc(x.material)}</td><td>${esc(x.spec || '')}</td><td class="num">${Fmt.num(x.rate)}</td></tr>`).join('')}</tbody><tfoot><tr><td colspan="2">Total cost</td><td class="num">${Fmt.inr(b.total)}</td></tr><tr><td colspan="2">Loss (${Fmt.pct(b.lossPct)})</td><td class="num">${Fmt.inr(b.loss)}</td></tr><tr><td colspan="2">Fabric base cost</td><td class="num">${Fmt.inr(b.baseCost)}</td></tr>${b.takenPc ? `<tr><td colspan="2">Taken / Pc</td><td class="num">${Fmt.inr(b.takenPc)}</td></tr>` : ''}<tr><td colspan="2">Rate used in costing (${b.rateSource === 'TAKEN' ? 'Taken / Pc' : 'base cost'})</td><td class="num">${Fmt.inr(b.appliedRate)}</td></tr></tfoot></table>`; }).join('')}
       <h2>Summary</h2><table><tbody><tr><td>All items total</td><td class="num">${Fmt.inr(r.itemsTotal)}</td></tr>${r.percentages.map((p) => `<tr><td>${esc(p.name)} ${Fmt.pct(p.pct)} (${p.basis === 'ITEMS' ? 'of items' : 'of running total'})</td><td class="num">${Fmt.inr(p.amount)}</td></tr>`).join('')}<tr><td><b>Total INR / pc</b></td><td class="num"><b>${Fmt.inr(r.totalInr)}</b></td></tr><tr><td><b>Price (${esc(v.currency)})</b></td><td class="num"><b>${Fmt.money(r.foreignPrice, v.currency, 4)}</b></td></tr></tbody></table>`;
   }
 
@@ -3627,8 +3923,8 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     view.insertAdjacentHTML('beforeend', `
       ${!editable ? `<div class="notice ${p.status === 'CLOSED' ? 'ok' : 'warn'}">${p.status === 'CLOSED' ? 'Pool is closed — expenses are read-only.' : p.status === 'DRAFT' ? 'Pool is a draft — activate it before entering expenses.' : 'Read-only: you do not have permission to edit expenses.'}</div>` : ''}
       <div class="kpis"><div class="kpi"><div class="l">Actual expenses (saved)</div><div class="v">${Fmt.inr(r.totals.totalActual)}</div></div><a class="kpi" href="#/limits?pool=${p.id}"><div class="l">Expense limits</div><div class="v">${Fmt.inr(r.totals.totalLimits)}</div></a><div class="kpi ${r.expenses.drafts ? 'warn' : ''}"><div class="l">Draft entries</div><div class="v">${r.expenses.drafts}</div></div><div class="kpi"><div class="l">Not fully paid</div><div class="v">${r.expenses.unpaid}</div></div></div>
-      <div class="card"><div class="hd"><h2>Quantities (kept separate)</h2></div><div class="bd p0"><div class="table-wrap"><table class="t"><thead><tr><th>Style</th><th class="num">Original order qty</th><th class="num">Pool-allocated qty</th><th class="num">Reference qty (manual)</th><th class="num">Fabric used</th><th class="num">Application paid qty</th><th class="num">CMT paid qty</th><th class="num">Shipped qty</th></tr></thead><tbody>
-        ${r.styles.map(qtyRow).map((x) => `<tr><td><b>${esc(x.styleRef)}</b></td><td class="num">${Fmt.qty(x.orderQty)}</td><td class="num">${Fmt.qty(x.allocQty)}</td><td class="num">${x.refQty === null ? '—' : Fmt.qty(x.refQty)}</td><td class="num">${esc(x.fab)}</td><td class="num">${Fmt.qty(x.app)}</td><td class="num">${Fmt.qty(x.cmt)}</td><td class="num">${Fmt.qty(x.shipped)}</td></tr>`).join('')}
+      <div class="card"><div class="hd"><h2>Quantities (kept separate)</h2></div><div class="bd p0"><div class="table-wrap"><table class="t"><thead><tr><th>Style</th><th class="num">Original order qty</th><th class="num">Pool-allocated qty</th><th class="num">CMT paid qty</th><th class="num">Shipped qty</th></tr></thead><tbody>
+        ${r.styles.map(qtyRow).map((x) => `<tr><td><b>${esc(x.styleRef)}</b></td><td class="num">${Fmt.qty(x.orderQty)}</td><td class="num">${Fmt.qty(x.allocQty)}</td><td class="num">${Fmt.qty(x.cmt)}</td><td class="num">${Fmt.qty(x.shipped)}</td></tr>`).join('')}
       </tbody></table></div></div></div>
       <div class="tabs" role="tablist">${cats.map((c) => { const n = exps.filter((e) => e.category === c.key).length; return `<button role="tab" class="${c.key === cat ? 'on' : ''}" data-cat="${c.key}" aria-selected="${c.key === cat}">${esc(c.label)}${n ? badge(n) : ''}</button>`; }).join('')}</div>
       <div class="card"><div class="hd"><h2>${esc(H.catLabel(cat))}</h2><span class="sec-total">${Fmt.inr(sum(exps.filter((e) => e.category === cat && e.status === 'SAVED'), (e) => D(e.amount)).toString())}</span>
@@ -3689,7 +3985,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     const m = modal({
       title: `${e ? 'Edit' : 'Add'} ${H.catLabel(cat)} expense${e ? ' ' + e.expNo : ''} — ${p.poolNo}`, size: 'lg',
       body: `<div class="form-grid">
-        ${UI.field({ name: 'styleId', label: 'Style', type: 'select', options: styleOpts, placeholder: false, span: 's6' }, v0.styleId || '')}
+        ${isF || isA ? `<input type="hidden" name="styleId" value="${esc(v0.styleId || '')}">` : UI.field({ name: 'styleId', label: 'Style', type: 'select', options: styleOpts, placeholder: false, span: 's6' }, v0.styleId || '')}
         ${UI.field({ name: 'costingPick', label: `Fetch from costing inputs`, type: 'select', options: [], placeholder: '— Manual entry —', span: 's6', help: can('expenses.edit') ? 'Or type a manual item below' : '' })}
         ${UI.field({ name: 'itemName', label: isF ? 'Fabric' : isA ? 'Application type' : isC ? 'CMT operation / details' : 'Item / description', required: true, span: 's6' }, v0.itemName)}
         ${isF ? UI.field({ name: 'colour', label: 'Colour', span: 's3' }, v0.colour) + UI.field({ name: 'spec', label: 'Fabric specification', span: 's3' }, v0.spec) : UI.field({ name: 'spec', label: 'Details', span: 's6' }, v0.spec)}
@@ -3699,6 +3995,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
         ${UI.field({ name: 'calc', label: 'Qty × rate', type: 'static', span: 's3', html: '<b id="eCalc">—</b>' })}
         ${UI.field({ name: 'billAmount', label: 'Bill amount (manual)', type: 'decimal', span: 's4', help: 'If entered, this is the actual expense; otherwise qty × rate is used' }, v0.billAmount)}
         ${UI.field({ name: 'act', label: 'Actual amount', type: 'static', span: 's4', html: '<b id="eAct">—</b>' })}
+        ${isF || isA ? `<div class="fld s12"><label>${isF ? 'Used quantity' : 'Paid quantity'} vs limit</label><div class="inp" style="background:var(--surface-2)"><span id="eLim" class="small muted">—</span></div><div class="help">Warning only — you can always save, even over the limit.</div></div>` : ''}
         ${isC ? UI.field({ name: 'factory', label: 'Factory', span: 's4' }, v0.factory) + UI.field({ name: 'sourcing', label: 'In-house / outsourced', type: 'select', options: [{ value: 'INHOUSE', label: 'In-house' }, { value: 'OUTSOURCED', label: 'Outsourced' }], required: true, span: 's4' }, v0.sourcing) : UI.field({ name: 'vendor', label: isA ? 'Party' : 'Vendor', span: 's4' }, v0.vendor)}
         ${UI.field({ name: 'billRef', label: 'Bill reference', span: 's4' }, v0.billRef)}
         ${UI.field({ name: 'billDate', label: 'Bill date', type: 'date', span: 's4' }, v0.billDate)}
@@ -3722,18 +4019,32 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
       h.innerHTML = s ? `Pool qty for ${esc(s.styleRef)}: <a href="#" data-q="${s.allocQty}">${s.allocQty}</a>${s.refQty ? ` · reference: <a href="#" data-q="${s.refQty.qty}">${s.refQty.qty}</a>` : ''}` : `Pool total: <a href="#" data-q="${r.totals.orderQty}">${r.totals.orderQty}</a>`;
       $$('[data-q]', h).forEach((a) => (a.onclick = (ev) => { ev.preventDefault(); S('qty').value = a.dataset.q; upd(); }));
     };
+    // Applicable quantity limit for the selected costing item (fabric: alloc × consumption × (1+loss);
+    // application: alloc × allowance per piece). Summed across styles when the entry is shared.
+    function reqQ(l, sid) { const s = r.styles.find((x) => x.styleId === sid); if (!s) return null; const a = D(s.allocQty); return isF ? a.mul(D(l.qty || 0)).mul(D(1).add(D(l.allowancePct || 0).div(100))) : a.mul(D(l.qty || 0)); }
+    function limitQtyNow() { const o = opts.find((x) => x.key === S('costingPick').value); if (!o) return null; const sid = S('styleId').value; if (sid) return reqQ(o.l, sid); let tot = D(0), any = false; opts.forEach((x) => { if (x.l.name === o.l.name && (!isF || (x.l.gsm || '') === (o.l.gsm || ''))) { const qn = reqQ(x.l, x.styleId); if (qn) { tot = tot.add(qn); any = true; } } }); return any ? tot : reqQ(o.l, o.styleId); }
+    function limWarn() {
+      const e2 = $('#eLim', el); if (!e2) return;
+      const lq = limitQtyNow(); const dp = isF ? 3 : 0; const unit = S('unit').value || '';
+      const uv = S('qty').value.trim(); const used = SP.Dec.valid(uv) ? D(uv) : null;
+      if (lq === null) { e2.innerHTML = badge('No costing limit', 'warn') + ' Manual item — no predefined limit; the entry can still be saved.'; return; }
+      if (used === null) { e2.innerHTML = `Applicable limit <b>${Fmt.num(lq.toString(), dp)} ${esc(unit)}</b>`; return; }
+      const diff = used.sub(lq), over = diff.gt(0);
+      e2.innerHTML = `Limit <b>${Fmt.num(lq.toString(), dp)} ${esc(unit)}</b> · used <b>${Fmt.num(used.toString(), dp)} ${esc(unit)}</b> · ` + (over ? badge('Over limit', 'bad') + ` +${Fmt.num(diff.toString(), dp)} ${esc(unit)} (saving is still allowed)` : badge('Within limit', 'ok') + ` ${Fmt.num(diff.abs().toString(), dp)} ${esc(unit)} left`);
+    }
     const upd = () => {
       let calc = null;
       try { calc = D(S('qty').value || 0).mul(S('rate').value || 0).round(2).toString(); $('#eCalc', el).textContent = Fmt.inr(calc); } catch (x) { $('#eCalc', el).textContent = 'invalid'; }
       const b = S('billAmount').value.trim();
       $('#eAct', el).textContent = b ? (SP.Dec.valid(b) ? Fmt.inr(b) + ' (bill)' : 'invalid') : calc !== null ? Fmt.inr(calc) + ' (qty × rate)' : '—';
+      limWarn();
     };
-    S('styleId').addEventListener('change', () => { fillOpts(); hint(); });
+    S('styleId').addEventListener('change', () => { fillOpts(); hint(); limWarn(); });
     S('costingPick').addEventListener('change', () => {
       const o = opts.find((x) => x.key === S('costingPick').value); if (!o) { S('source').value = 'MANUAL'; return; }
       S('itemName').value = o.l.name; S('rate').value = o.l.rate; if (o.l.unit) S('unit').value = isF ? (o.l.rateUnit || o.l.unit) : o.l.unit;
       if (isF) { S('colour').value = o.l.colour || ''; S('spec').value = [o.l.composition, o.l.gsm && o.l.gsm + ' GSM', o.l.description].filter(Boolean).join(' · '); }
-      if (!S('styleId').value) S('styleId').value = o.styleId;
+      if (!isF && !isA && !S('styleId').value) S('styleId').value = o.styleId;
       if (!isF && !S('qty').value) { const s = r.styles.find((x) => x.styleId === o.styleId); if (s) S('qty').value = s.refQty ? s.refQty.qty : s.allocQty; }
       S('source').value = 'COSTING'; S('costingRef').value = `${o.v.label}:${o.l.name}`; upd(); hint();
     });
@@ -4044,27 +4355,13 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
         <div class="table-wrap"><table class="t"><thead><tr><th>Style</th><th>Costing</th><th class="num">Costing INR</th><th class="num">Rate</th><th class="num">Costing price</th><th class="num">Confirmed price</th><th class="num">Qty</th><th class="num">Variance %</th></tr></thead><tbody>
         ${v.styles.flatMap((s) => s.parts.map((x, i) => `<tr><td>${i === 0 ? `<b>${esc(s.styleRef)}</b>` : ''}</td><td>${esc(x.costingLabel)}</td><td class="num">${Fmt.inr(x.costingInr)}</td><td class="num">${Fmt.num(x.rate, 2)}</td><td class="num">${Fmt.num(x.costingPrice, 4)}</td><td class="num">${Fmt.num(x.confirmed, 2)}</td><td class="num">${Fmt.qty(x.qty)}</td><td class="num">${signed(x.pct, (y) => Fmt.pct(y))}</td></tr>`).concat(s.parts.length > 1 ? [`<tr class="sub"><td colspan="7">${esc(s.styleRef)} weighted</td><td class="num">${Fmt.pct(s.pct)}</td></tr>`] : [])).join('')}
         </tbody><tfoot><tr><td colspan="7">Pool variance (${esc(METH[v.method])})</td><td class="num">${Fmt.pct(v.computedPoolPct)}</td></tr>${v.override ? `<tr><td colspan="7">Approved override — ${esc(v.override.reason)} (${esc(v.override.by)}, ${fmtDate(v.override.at)})</td><td class="num">${Fmt.pct(v.override.pct)}</td></tr>` : ''}</tfoot></table></div></div></div>
-      <div class="card"><div class="hd"><h2>By category</h2></div><div class="bd p0" id="lc"></div></div>
-      <div class="card"><div class="hd"><h2>By style and category</h2></div><div class="bd p0" id="ls"></div></div>`);
+      <div class="card"><div class="hd"><h2>By category</h2></div><div class="bd p0" id="lc"></div></div>`);
     const stCell = (x) => (x.status === 'OVER' ? badge('Over limit', 'bad') : x.status === 'UNDER' ? badge('Within limit', 'ok') : badge('At limit', 'info'));
     table($('#lc', view), {
       id: 'lim-cat-' + p.id, noPaging: true, rows: r.byCat, exportName: `${p.poolNo}-expense-limits-by-category`,
       columns: [{ key: 'label', label: 'Category', render: (x) => `<b>${esc(x.label)}</b>` }, { key: 'limit', label: 'Expense limit', num: true, render: (x) => Fmt.inr(x.limit) }, { key: 'actual', label: 'Actual', num: true, render: (x) => Fmt.inr(x.actual) }, { key: 'diff', label: 'Difference', num: true, render: (x) => signed(x.diff) }, { key: 'diffPct', label: 'Diff %', num: true, render: (x) => (x.diffPct === null ? '—' : Fmt.pct(x.diffPct)) }, { key: 'status', label: 'Status', render: stCell }, { key: 'entries', label: 'Entries', num: true }],
       footer: () => `<td>Total</td><td class="num">${Fmt.inr(r.totals.totalLimits)}</td><td class="num">${Fmt.inr(r.totals.totalActual)}</td><td class="num">${signed(r.totals.expenseDiff)}</td><td class="num">${r.totals.expenseDiffPct === null ? '—' : Fmt.pct(r.totals.expenseDiffPct)}</td><td colspan="2"></td>`,
       onRow: (x) => drill(p, r, null, x.category),
-    });
-    table($('#ls', view), {
-      id: 'lim-sty-' + p.id, rows: r.limits, exportName: `${p.poolNo}-expense-limits`, pageSize: 30,
-      filters: [{ key: 'styleRef', label: 'Style', options: () => Array.from(new Set(r.limits.map((x) => x.styleRef))) }, { key: 'category', label: 'Category', options: () => r.byCat.map((c) => ({ value: c.category, label: c.label })) }, { key: 'status', label: 'Status', options: ['UNDER', 'OVER', 'EQUAL'] }],
-      columns: [
-        { key: 'styleRef', label: 'Style', render: (x) => `<b>${esc(x.styleRef)}</b>` }, { key: 'categoryLabel', label: 'Category' },
-        { key: 'qty', label: 'Applicable qty', num: true, render: (x) => (x.qty === null ? '—' : Fmt.qty(x.qty)) },
-        { key: 'costPerPiece', label: 'Cost / pc (costing)', num: true, render: (x) => (x.costPerPiece === null ? '—' : Fmt.inr(x.costPerPiece)) },
-        { key: 'variancePct', label: 'Variance %', num: true, render: (x) => (x.variancePct === null ? '—' : x.varianceApplied ? Fmt.pct(x.variancePct) : '<span class="faint">not applied</span>') },
-        { key: 'limit', label: 'Expense limit', num: true, render: (x) => Fmt.inr(x.limit) }, { key: 'actual', label: 'Actual', num: true, render: (x) => Fmt.inr(x.actual) },
-        { key: 'diff', label: 'Difference', num: true, render: (x) => signed(x.diff) }, { key: 'diffPct', label: 'Diff %', num: true, render: (x) => (x.diffPct === null ? '—' : Fmt.pct(x.diffPct)) }, { key: 'status', label: 'Status', render: stCell },
-      ],
-      onRow: (x) => drill(p, r, x.styleId, x.category),
     });
     const ov = $('#ovr', view);
     if (ov) ov.onclick = () => modal({
@@ -4177,11 +4474,9 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
         <div class="card"><div class="hd"><h2>Actual expense-based margin <span class="badge ok">result</span></h2></div><div class="bd"><div class="sumrow"><span>INR received (incl. additions / deductions)</span><span class="num">${Fmt.inr(r.totals.inrReceived)}</span></div><div class="sumrow"><span>− Actual expenses (saved entries)</span><span class="num">${Fmt.inr(r.totals.totalActual)}</span></div><div class="sumrow big"><span>Actual expense-based margin</span><span class="num ${D(r.margins.actualMargin).isNeg() ? 'neg' : ''}">${Fmt.inr(r.margins.actualMargin)}</span></div><div class="small muted">${Fmt.pct(r.margins.actualMarginPct)} of INR received. No other adjustments are deducted — additions/deductions are already in INR received.</div></div></div>
       </div>
       <div class="card"><div class="hd"><h2>Category-wise expense variance</h2></div><div class="bd p0" id="rc"></div></div>
-      <div class="card"><div class="hd"><h2>Style-wise</h2></div><div class="bd p0" id="rs"></div></div>
       <div class="grid2"><div class="card"><div class="hd"><h2>Costing variance</h2></div><div class="bd">${r.variance.styles.map((s) => `<div class="sumrow"><span>${esc(s.styleRef)}</span><span class="num">${Fmt.pct(s.pct)}</span></div>`).join('')}<div class="sumrow total"><span>Applied</span><span class="num">${r.variance.override ? Fmt.pct(r.variance.override.pct) + ' (override)' : r.variance.scope === 'STYLE' ? 'per style' : Fmt.pct(r.variance.computedPoolPct)}</span></div></div></div>
       <div class="card"><div class="hd"><h2>Status</h2></div><div class="bd"><div class="sumrow"><span>Missing / additional items</span><span>${r.exceptions.total} total · ${r.exceptions.pending ? badge(r.exceptions.pending + ' pending', 'warn') : badge('all decided', 'ok')}</span></div><div class="sumrow"><span>Draft expense entries</span><span>${r.expenses.drafts}</span></div><div class="sumrow"><span>Closure</span><span>${status(p.status)} ${cl.length ? `v${cl[cl.length - 1].version} ${fmtDT(cl[cl.length - 1].closedAt)}` : ''}</span></div></div></div></div>`);
     table($('#rc', body), { id: 'rep-cat-' + p.id, noToolbar: true, noPaging: true, rows: r.byCat, columns: [{ key: 'label', label: 'Category' }, { key: 'limit', label: 'Limit', num: true, render: (x) => Fmt.inr(x.limit) }, { key: 'actual', label: 'Actual', num: true, render: (x) => Fmt.inr(x.actual) }, { key: 'diff', label: 'Difference', num: true, render: (x) => signed(x.diff) }, { key: 'diffPct', label: '%', num: true, render: (x) => (x.diffPct === null ? '—' : Fmt.pct(x.diffPct)) }, { key: 'status', label: 'Status', render: (x) => status(x.status) }], footer: () => `<td>Total</td><td class="num">${Fmt.inr(r.totals.totalLimits)}</td><td class="num">${Fmt.inr(r.totals.totalActual)}</td><td class="num">${signed(r.totals.expenseDiff)}</td><td class="num">${r.totals.expenseDiffPct === null ? '—' : Fmt.pct(r.totals.expenseDiffPct)}</td><td></td>` });
-    table($('#rs', body), { id: 'rep-sty-' + p.id, noToolbar: true, noPaging: true, rows: r.styleProfit, columns: [{ key: 'styleRef', label: 'Style' }, { key: 'allocQty', label: 'Qty', num: true }, { key: 'shipped', label: 'Shipped', num: true }, { key: 'inr', label: 'Shipment INR', num: true, render: (x) => Fmt.inr(x.inr) }, { key: 'limit', label: 'Limits', num: true, render: (x) => Fmt.inr(x.limit) }, { key: 'actual', label: 'Actual', num: true, render: (x) => Fmt.inr(x.actual) }, { key: 'budgetMargin', label: 'Budget-based', num: true, render: (x) => signed(x.budgetMargin) }, { key: 'actualMargin', label: 'Actual-based', num: true, render: (x) => signed(x.actualMargin) }] });
     const sheets = () => [
       { name: 'Summary', head: ['Item', 'Value'], rows: [['Pool', p.poolNo], ['Buyer', (r.buyer || {}).name], ['Status', p.status], ['Order qty', r.totals.orderQty], ['Shipped qty', r.totals.shippedQty], ['Shipment INR', r.totals.shipmentInr], ['Additions', r.totals.additions], ['Deductions', r.totals.deductions], ['INR received', r.totals.inrReceived], ['Total expense limits', r.totals.totalLimits], ['Total actual expenses', r.totals.totalActual], ['Budget-based margin', r.margins.budgetMargin], ['Budget-based margin %', r.margins.budgetMarginPct], ['Actual expense-based margin', r.margins.actualMargin], ['Actual expense-based margin %', r.margins.actualMarginPct], ['Variance applied %', r.variance.override ? r.variance.override.pct : r.variance.computedPoolPct]] },
       { name: 'Categories', head: ['Category', 'Limit', 'Actual', 'Difference', 'Diff %', 'Status'], rows: r.byCat.map((c) => [c.label, c.limit, c.actual, c.diff, c.diffPct, c.status]) },
@@ -4197,7 +4492,6 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
       <h2>INR received</h2><table><tbody><tr><td>Total INR shipment value</td><td class="num">${Fmt.inr(r.totals.shipmentInr)}</td></tr><tr><td>+ Additions</td><td class="num">${Fmt.inr(r.totals.additions)}</td></tr><tr><td>− Deductions</td><td class="num">${Fmt.inr(r.totals.deductions)}</td></tr><tr><td><b>INR received</b></td><td class="num"><b>${Fmt.inr(r.totals.inrReceived)}</b></td></tr></tbody></table>
       <h2>Margins</h2><table><tbody><tr><td>Budget-based margin (INR received − expense limits ${Fmt.inr(r.totals.totalLimits)}) — estimate</td><td class="num">${Fmt.inr(r.margins.budgetMargin)} (${Fmt.pct(r.margins.budgetMarginPct)})</td></tr><tr><td>Actual expense-based margin (INR received − actual expenses ${Fmt.inr(r.totals.totalActual)}) — result</td><td class="num"><b>${Fmt.inr(r.margins.actualMargin)}</b> (${Fmt.pct(r.margins.actualMarginPct)})</td></tr></tbody></table>
       <h2>Category-wise expense variance</h2><table><thead><tr><th>Category</th><th class="num">Limit</th><th class="num">Actual</th><th class="num">Limit − actual</th><th class="num">%</th></tr></thead><tbody>${r.byCat.map((c) => `<tr><td>${esc(c.label)}</td><td class="num">${Fmt.num(c.limit)}</td><td class="num">${Fmt.num(c.actual)}</td><td class="num">${Fmt.num(c.diff)}</td><td class="num">${c.diffPct === null ? '—' : Fmt.pct(c.diffPct)}</td></tr>`).join('')}</tbody><tfoot><tr><td>Total</td><td class="num">${Fmt.num(r.totals.totalLimits)}</td><td class="num">${Fmt.num(r.totals.totalActual)}</td><td class="num">${Fmt.num(r.totals.expenseDiff)}</td><td class="num">${r.totals.expenseDiffPct === null ? '—' : Fmt.pct(r.totals.expenseDiffPct)}</td></tr></tfoot></table>
-      <h2>Style-wise</h2><table><thead><tr><th>Style</th><th class="num">Qty</th><th class="num">Shipped</th><th class="num">Shipment INR</th><th class="num">Limits</th><th class="num">Actual</th></tr></thead><tbody>${r.styleProfit.map((x) => `<tr><td>${esc(x.styleRef)}</td><td class="num">${x.allocQty}</td><td class="num">${x.shipped}</td><td class="num">${Fmt.num(x.inr)}</td><td class="num">${Fmt.num(x.limit)}</td><td class="num">${Fmt.num(x.actual)}</td></tr>`).join('')}</tbody></table>
       <p class="muted">Costing variance applied: ${r.variance.override ? Fmt.pct(r.variance.override.pct) + ' (approved override: ' + esc(r.variance.override.reason) + ')' : Fmt.pct(r.variance.computedPoolPct)}. Missing/additional items: ${r.exceptions.total} (${r.exceptions.pending} pending). Formula ${esc(Calc.FORMULA_VERSION)}.</p>`;
   }
 
@@ -4377,11 +4671,19 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
       save('sG', (c) => { const v = read(c); return { company: v.company, numberFormat: v.numberFormat, sessionMinutes: v.sessionMinutes }; });
     } else if (tab === 'costing') {
       sb.innerHTML = card('Costing formula', `<p class="small muted" style="margin-top:0">Row amount = qty/consumption × rate × (1 + allowance %). Fabric uses a loss allowance: the workbook's fabric amounts (e.g. 0.080 kg × ₹500 = 40 → 42.00) are all reproduced with 5%. New fabric rows default to the value below; each row can override it.</p>` + form([{ name: 'fabricLossPct', label: 'Default fabric loss %', type: 'decimal', span: 's4' }], s) + `<h3 style="margin:16px 0 6px">Default overall percentage components (new costings)</h3><div id="pctList"></div><button class="btn sm" type="button" id="pctAdd">${ico('plus')}Add component</button>`, 'sC') +
+        card('Fabric rate build-up — default template', `${s.fabricBuild.confirmed ? '' : '<div class="notice warn"><b>Pending confirmation.</b> The reference costing sheet lists Yarn 300 + Knitting 12 + Dyeing 100 + Stendering 20 + Compacting 10 = ₹442.00, and 10% loss = ₹44.20, but it prints the fabric base cost as ₹486.40. The arithmetic gives ₹486.20, which is what the app calculates (base cost = total + total × loss %). Tick the box below once the client confirms this.</div>'}<p class="small muted" style="margin-top:0">These rows and the loss % are copied into a fabric row when the user chooses “Build rate from materials &amp; processes”, and can be edited there. Existing costings are not changed.</p>` + form([{ name: 'fbLossPct', label: 'Default build-up loss %', type: 'decimal', span: 's4', help: 'Process loss on the build-up total (separate from the fabric row consumption loss)' }, { name: 'fbConfirmed', label: 'Formula confirmed by the client (base cost = total + loss)', type: 'checkbox', span: 's12' }], { fbLossPct: s.fabricBuild.lossPct, fbConfirmed: s.fabricBuild.confirmed }) + `<div class="table-wrap" style="margin-top:12px"><div id="fbList"></div></div><button class="btn sm" type="button" id="fbAddT">${ico('plus')}Add material / process</button><div class="small muted" id="fbPrev" style="margin-top:8px"></div>`, 'sFB') +
         card('Master lists', form([{ name: 'units', label: 'Units (comma separated)', span: 's12', help: 'Consumption and rate units must match on a costing row; incompatible units are rejected.' }, { name: 'productTypes', label: 'Product types', span: 's12' }, { name: 'extraCategories', label: 'Additional expense categories', span: 's12', help: 'Added after Fabric, Application, Others, CMT, Trims, Labelling, Packing accessories, Packaging, Forwarding, Bank charges' }, { name: 'sizeSets', label: 'Size sets (one per line: Name: size1, size2, …)', type: 'textarea', span: 's12', attrs: 'rows="5"' }], { units: s.units.join(', '), productTypes: s.productTypes.join(', '), extraCategories: s.extraCategories.join(', '), sizeSets: s.sizeSets.map((x) => `${x.name}: ${x.sizes.join(', ')}`).join('\n') }), 'sM');
       let pcts = SP.clone(s.defaultPercentages);
       const drawP = () => { $('#pctList', sb).innerHTML = `<table class="t"><thead><tr><th>Name</th><th>%</th><th>Basis</th><th></th></tr></thead><tbody>${pcts.map((p, i) => `<tr><td><input class="cell" data-i="${i}" data-f="name" value="${esc(p.name)}"></td><td style="width:90px"><input class="cell num" data-i="${i}" data-f="pct" value="${esc(p.pct)}"></td><td><select class="cell" data-i="${i}" data-f="basis"><option value="ITEMS"${p.basis === 'ITEMS' ? ' selected' : ''}>% of items total</option><option value="CUMULATIVE"${p.basis === 'CUMULATIVE' ? ' selected' : ''}>% of running total</option></select></td><td><button class="btn xs danger" data-rm="${i}" type="button">${ico('trash')}</button></td></tr>`).join('')}</tbody></table>`; $$('[data-i]', sb).forEach((x) => (x.oninput = x.onchange = () => (pcts[+x.dataset.i][x.dataset.f] = x.value))); $$('[data-rm]', sb).forEach((b) => (b.onclick = () => { pcts.splice(+b.dataset.rm, 1); drawP(); })); };
       drawP(); $('#pctAdd', sb).onclick = () => { pcts.push({ name: 'Component', pct: '0', basis: 'ITEMS' }); drawP(); };
       save('sC', (c) => ({ fabricLossPct: read(c).fabricLossPct, defaultPercentages: pcts }));
+      let fbRows = SP.clone(s.fabricBuild.processes);
+      const fbCard = $('#sFB', sb).closest('.card');
+      const prevFB = () => { const r = Calc.fabricBuild({ processes: fbRows, lossPct: $('[name=fbLossPct]', fbCard).value }); $('#fbPrev', sb).textContent = r.errors.length ? r.errors[0] : `Preview: total ${Fmt.inr(r.total)} + loss ${Fmt.inr(r.loss)} = fabric base cost ${Fmt.inr(r.baseCost)}`; };
+      const drawFB = () => { $('#fbList', sb).innerHTML = `<table class="t fb-table"><thead><tr><th>#</th><th>Material / Process</th><th>Type / Spec</th><th class="num">Rate (₹)</th><th></th></tr></thead><tbody>${fbRows.map((p, i) => `<tr><td class="faint small fb-n">${i + 1}</td><td data-th="Material / Process"><input class="cell" data-fi="${i}" data-f="material" value="${esc(p.material)}" maxlength="80"></td><td data-th="Type / Spec"><input class="cell" data-fi="${i}" data-f="spec" value="${esc(p.spec || '')}" maxlength="120"></td><td data-th="Rate (₹)" class="fb-rate"><input class="cell num" data-fi="${i}" data-f="rate" value="${esc(p.rate)}" inputmode="decimal"></td><td class="fb-del"><button class="btn xs danger" data-fr="${i}" type="button" aria-label="Remove row">${ico('trash')}</button></td></tr>`).join('')}</tbody></table>`; $$('[data-fi]', sb).forEach((x) => (x.oninput = () => { fbRows[+x.dataset.fi][x.dataset.f] = x.value; prevFB(); })); $$('[data-fr]', sb).forEach((b) => (b.onclick = () => { fbRows.splice(+b.dataset.fr, 1); drawFB(); })); prevFB(); };
+      drawFB(); $('#fbAddT', sb).onclick = () => { fbRows.push({ material: '', spec: '', rate: '0' }); drawFB(); };
+      $('[name=fbLossPct]', fbCard).oninput = prevFB;
+      save('sFB', (c) => { const v = read(c); return { fabricBuild: { lossPct: v.fbLossPct, confirmed: v.fbConfirmed, processes: fbRows } }; });
       save('sM', (c) => { const v = read(c); const split = (x) => x.split(',').map((y) => y.trim()).filter(Boolean); return { units: split(v.units), productTypes: split(v.productTypes), extraCategories: split(v.extraCategories), sizeSets: v.sizeSets.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => { const i = l.indexOf(':'); if (i < 0) throw new AppError(`Size set line "${l}" must be "Name: size1, size2"`); return { name: l.slice(0, i).trim(), sizes: split(l.slice(i + 1)) }; }) }; });
     } else if (tab === 'limits') {
       const v = s.variance;
@@ -4438,8 +4740,26 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
   async function boot() {
     const root = document.getElementById('root');
     if (!G.localStorage) { root.innerHTML = '<div class="loading">This browser does not support local storage.</div>'; return; }
-    try { await Store.init(SP.LocalStorageAdapter); }
-    catch (e) { console.error(e); root.innerHTML = `<div class="loading">Could not open local storage: ${esc(e.message)}. Private browsing may block it.</div>`; return; }
+
+    // Firebase (Cloud Firestore) is the cloud store. A local cache keeps the app working with no
+    // errors even when Firebase is slow or offline; every change syncs to Firebase once it connects.
+    let adapter = SP.LocalStorageAdapter;
+    const fb = await Promise.race([SP.firebaseReady, new Promise((r) => setTimeout(() => r(null), 10000))]).catch(() => null);
+    if (fb && fb.adapter) { adapter = fb.adapter; SP._fbInfo = fb; }
+    try { await Store.init(adapter); }
+    catch (e) {
+      console.warn('Primary storage failed, using on-device cache:', e && e.message);
+      SP._fbInfo = null;
+      try { await Store.init(SP.LocalStorageAdapter); }
+      catch (e2) { root.innerHTML = `<div class="loading">Could not open storage: ${esc(e2.message)}. Private browsing may block it.</div>`; return; }
+    }
+
+    if (SP._fbInfo && SP._fbInfo.subscribe) SP._fbInfo.subscribe(() => { if (!(App.dirty && App.dirty())) Store.reload(); });
+    setTimeout(() => {
+      const connected = !!(SP._fbInfo && Store.adapter && Store.adapter.connected);
+      UI.toast(connected ? 'Connected to Firebase — data is saved to the cloud.' : 'Saved on this device; it will sync to Firebase once connected.', connected ? 'ok' : 'warn');
+    }, 1200);
+
     svc.restoreSession();
     let lastHash = location.hash;
     G.addEventListener('hashchange', () => {
@@ -4464,5 +4784,67 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
 })(window);
 
 </script>
+<script type="module">
+/* ---- firebase.js ----
+   Initialises Firebase and builds the Cloud Firestore storage adapter the app boots with.
+   The whole database is mirrored to one Firestore document; localStorage stays as the
+   offline cache. Any failure here is non-fatal: SP.firebaseReady resolves to null and the
+   app falls back to local-only storage. Business logic never calls Firebase directly. */
+const SDK = 'https://www.gstatic.com/firebasejs/10.12.5';
+const firebaseConfig = {
+  apiKey: 'AIzaSyDU4sPBXxdyXGFgyvhLv0jKLe2VyOnkIHg',
+  authDomain: 'exports-14e94.firebaseapp.com',
+  projectId: 'exports-14e94',
+  storageBucket: 'exports-14e94.firebasestorage.app',
+  messagingSenderId: '207916589361',
+  appId: '1:207916589361:web:009b589d8808a547999010',
+  measurementId: 'G-VRE8D8T14C',
+};
+const resolve = (window.SP && window.SP._resolveFirebase) || (() => {});
+(async () => {
+  try {
+    const { initializeApp } = await import(`${SDK}/firebase-app.js`);
+    const { getFirestore, doc, getDoc, getDocFromServer, setDoc, runTransaction, onSnapshot, serverTimestamp } = await import(`${SDK}/firebase-firestore.js`);
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+    // Shared company database lives in one document: collection "costing", document "app".
+    const docRef = doc(db, 'costing', 'app');
+
+    // Anonymous sign-in (optional). If the Anonymous provider is enabled and the rules require
+    // auth, this makes writes work; if it fails we continue anyway (open/test rules still work).
+    try {
+      const { getAuth, signInAnonymously, onAuthStateChanged } = await import(`${SDK}/firebase-auth.js`);
+      const auth = getAuth(app);
+      await new Promise((res) => { const off = onAuthStateChanged(auth, (u) => { if (u) { off(); res(); } }); signInAnonymously(auth).catch(() => { off(); res(); }); setTimeout(res, 5000); });
+    } catch (e) { console.warn('Firebase anonymous auth unavailable:', e && e.message); }
+
+    // Use a SERVER read (not the offline cache) so "not connected" is detected reliably.
+    const adapter = window.SP.FirestoreMirrorAdapter({ db, docRef, getDoc, setDoc, runTransaction, serverTimestamp });
+    // Live cross-device updates: re-read when another device writes a newer revision.
+    const subscribe = (cb) => onSnapshot(docRef, (snap) => {
+      try {
+        if (!snap.exists() || snap.metadata.hasPendingWrites) return;
+        const rev = snap.data().rev;
+        if (window.SP.Store && window.SP.Store.db && rev !== window.SP.Store.db.meta.rev) cb(rev);
+      } catch (e) {}
+    }, (err) => console.warn('Firebase live sync stopped:', err && err.message));
+
+    // Analytics (best effort; never blocks storage).
+    import(`${SDK}/firebase-analytics.js`).then(async ({ getAnalytics, isSupported, logEvent }) => {
+      if (!(await isSupported())) return;
+      const analytics = getAnalytics(app);
+      window.SP.Firebase = Object.assign(window.SP.Firebase || {}, { analytics });
+      window.addEventListener('hashchange', () => logEvent(analytics, 'screen_view', { firebase_screen: (location.hash.replace(/^#\/?/, '').split('?')[0] || 'home'), firebase_screen_class: 'SPA' }));
+    }).catch(() => {});
+
+    window.SP.Firebase = Object.assign(window.SP.Firebase || {}, { app, db, docRef });
+    resolve({ adapter, subscribe });
+  } catch (e) {
+    console.warn('Firebase not initialised — using local storage only:', e && e.message);
+    resolve(null);
+  }
+})();
+</script>
 </body>
 </html>
+
