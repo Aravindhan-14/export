@@ -888,7 +888,6 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
   // Resolved by the Firebase module at the end of the page with { adapter } or null.
   G.SP = G.SP || {};
   G.SP.firebaseReady = new Promise((res) => { G.SP._resolveFirebase = res; });
-<<<<<<< HEAD
   /** Firebase-only adapter: Cloud Firestore is the single source of truth. localStorage is NEVER
       used as a store — it is only read once to migrate existing on-device data up to Firebase.
       If Firestore is unreachable, load()/save() throw so the app can show a clear "connect
@@ -920,9 +919,6 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
   }
   G.SP.FirestoreMirrorAdapter = FirestoreMirrorAdapter;
   G.SP.FirestoreAdapter = FirestoreAdapter;
-=======
-  G.SP.FirestoreMirrorAdapter = FirestoreMirrorAdapter;
->>>>>>> 7b2864c2373d05d0a7097aee6108ecfb6dd5b32a
 
   /* ---------------- Store ---------------- */
   const Store = {
@@ -4744,7 +4740,6 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
   async function boot() {
     const root = document.getElementById('root');
     if (!G.localStorage) { root.innerHTML = '<div class="loading">This browser does not support local storage.</div>'; return; }
-<<<<<<< HEAD
 
     // Firebase (Cloud Firestore) is the cloud store. A local cache keeps the app working with no
     // errors even when Firebase is slow or offline; every change syncs to Firebase once it connects.
@@ -4765,28 +4760,6 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
       UI.toast(connected ? 'Connected to Firebase — data is saved to the cloud.' : 'Saved on this device; it will sync to Firebase once connected.', connected ? 'ok' : 'warn');
     }, 1200);
 
-=======
-    // Prefer the Firebase (Firestore) adapter when it is ready; fall back to local-only storage.
-    let adapter = SP.LocalStorageAdapter;
-    try {
-      const fb = await Promise.race([SP.firebaseReady, new Promise((r) => setTimeout(() => r(null), 9000))]);
-      if (fb && fb.adapter) { adapter = fb.adapter; SP._fbInfo = fb; }
-    } catch (e) { /* use local storage */ }
-    try { await Store.init(adapter); }
-    catch (e) {
-      console.error(e);
-      if (adapter !== SP.LocalStorageAdapter) { try { await Store.init(SP.LocalStorageAdapter); } catch (e2) { root.innerHTML = `<div class="loading">Could not open local storage: ${esc(e2.message)}.</div>`; return; } }
-      else { root.innerHTML = `<div class="loading">Could not open local storage: ${esc(e.message)}. Private browsing may block it.</div>`; return; }
-    }
-    // Live cross-device sync + a one-time status toast so you can see whether Firebase is connected.
-    if (SP._fbInfo) {
-      const a = adapter;
-      if (SP._fbInfo.subscribe) SP._fbInfo.subscribe(() => { if (!(App.dirty && App.dirty())) Store.reload(); });
-      setTimeout(() => { if (a.connected) UI.toast('Connected to Firebase — data is syncing to the cloud', 'ok'); else UI.toast('Firebase not connected — saving on this device only. See Settings help / browser console.', 'warn'); }, 1200);
-    } else {
-      setTimeout(() => UI.toast('Firebase unavailable — saving on this device only.', 'warn'), 1200);
-    }
->>>>>>> 7b2864c2373d05d0a7097aee6108ecfb6dd5b32a
     svc.restoreSession();
     let lastHash = location.hash;
     G.addEventListener('hashchange', () => {
@@ -4831,11 +4804,7 @@ const resolve = (window.SP && window.SP._resolveFirebase) || (() => {});
 (async () => {
   try {
     const { initializeApp } = await import(`${SDK}/firebase-app.js`);
-<<<<<<< HEAD
     const { getFirestore, doc, getDoc, getDocFromServer, setDoc, runTransaction, onSnapshot, serverTimestamp } = await import(`${SDK}/firebase-firestore.js`);
-=======
-    const { getFirestore, doc, getDoc, setDoc, runTransaction, onSnapshot, serverTimestamp } = await import(`${SDK}/firebase-firestore.js`);
->>>>>>> 7b2864c2373d05d0a7097aee6108ecfb6dd5b32a
     const app = initializeApp(firebaseConfig);
     const db = getFirestore(app);
     // Shared company database lives in one document: collection "costing", document "app".
@@ -4849,10 +4818,7 @@ const resolve = (window.SP && window.SP._resolveFirebase) || (() => {});
       await new Promise((res) => { const off = onAuthStateChanged(auth, (u) => { if (u) { off(); res(); } }); signInAnonymously(auth).catch(() => { off(); res(); }); setTimeout(res, 5000); });
     } catch (e) { console.warn('Firebase anonymous auth unavailable:', e && e.message); }
 
-<<<<<<< HEAD
     // Use a SERVER read (not the offline cache) so "not connected" is detected reliably.
-=======
->>>>>>> 7b2864c2373d05d0a7097aee6108ecfb6dd5b32a
     const adapter = window.SP.FirestoreMirrorAdapter({ db, docRef, getDoc, setDoc, runTransaction, serverTimestamp });
     // Live cross-device updates: re-read when another device writes a newer revision.
     const subscribe = (cb) => onSnapshot(docRef, (snap) => {
