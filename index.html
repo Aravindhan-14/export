@@ -955,24 +955,27 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     /** Atomic mutation: fn runs on a draft copy; nothing is saved if it throws. */
     commit(fn) {
       const run = this._chain.then(async () => {
-        const draft = clone(this.db);
-        const result = await fn(draft);
-        const prevRev = this.db.meta.rev;
-        draft.meta.rev = prevRev + 1;
-        draft.meta.updatedAt = now();
-        try { await this.adapter.save(draft, prevRev); }
-        catch (e) {
-          if (e.code === 'CONFLICT') {
-            await this.reload();
-            throw new AppError('Data was changed in another window. The latest data has been reloaded — please repeat the action.', null, 'CONFLICT');
+        // Retry transient save conflicts automatically (e.g. a background Firebase sync bumped the
+        // revision) by reloading the latest data and re-applying the change, so the user never sees
+        // a spurious "data was changed in another window" error for their own single edits.
+        for (let attempt = 0; attempt < 4; attempt++) {
+          const draft = clone(this.db);
+          const result = await fn(draft);
+          const prevRev = this.db.meta.rev;
+          draft.meta.rev = prevRev + 1;
+          draft.meta.updatedAt = now();
+          try { await this.adapter.save(draft, prevRev); }
+          catch (e) {
+            if (e.code === 'CONFLICT' && attempt < 3) { await this.reload(); continue; }
+            if (e.code === 'CONFLICT') { await this.reload(); throw new AppError('Data was changed in another window. The latest data has been reloaded — please repeat the action.', null, 'CONFLICT'); }
+            throw e;
           }
-          throw e;
+          this.db = draft;
+          Fmt.indian = draft.settings.numberFormat === 'indian';
+          if (this.channel) this.channel.postMessage('changed');
+          this.emit();
+          return result;
         }
-        this.db = draft;
-        Fmt.indian = draft.settings.numberFormat === 'indian';
-        if (this.channel) this.channel.postMessage('changed');
-        this.emit();
-        return result;
       });
       this._chain = run.catch(() => {});
       return run;
@@ -1723,7 +1726,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     if (!D(amount).gt(0) && data.status !== 'DRAFT') fail('Amount must be greater than zero (enter qty × rate or a bill amount)', 'billAmount');
     const fields = {
       poolId: p.id, styleId, category: data.category, source: data.source === 'COSTING' ? 'COSTING' : 'MANUAL', costingRef: optStr(data.costingRef, 200),
-      itemName: reqStr(data.itemName, 'itemName', 'Item / description', 200), colour: optStr(data.colour, 80), spec: optStr(data.spec, 300),
+      itemName: reqStr(data.itemName, 'itemName', 'Item / description', 200), colour: optStr(data.colour, 80), spec: optStr(data.spec, 300), fabClass: data.category === 'FABRIC' ? (['Material', 'Process', 'Others'].includes(data.fabClass) ? data.fabClass : 'Material') : (data.fabClass || null),
       qty, unit, rate, calcAmount, billAmount, amount, vendor: optStr(data.vendor, 200), billRef: optStr(data.billRef, 80),
       billDate: date(data.billDate, 'billDate', 'Bill date', false), factory: optStr(data.factory, 200),
       sourcing: ['INHOUSE', 'OUTSOURCED'].includes(data.sourcing) ? data.sourcing : null,
@@ -2034,6 +2037,20 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
   }
 
   /* ---------- Closure ---------- */
+  /** Every distinct costing item of every style allocated to the pool (for the closure verification checklist). */
+  function poolItems(db, poolId) {
+    const out = [], seen = new Set();
+    db.allocations.filter((a) => a.poolId === poolId && a.status === 'ACTIVE').forEach((a) => {
+      const line = byId(db, 'lines', a.lineId); if (!line || !line.costingId) return;
+      const v = byId(db, 'costings', line.costingId); if (!v) return;
+      const st = byId(db, 'styles', v.styleId) || { styleRef: '—' };
+      (v.lines || []).forEach((l) => {
+        const key = `${v.styleId}:${l.id}`; if (seen.has(key)) return; seen.add(key);
+        out.push({ key, styleId: v.styleId, styleRef: st.styleRef, category: l.category, categoryLabel: catLabel(l.category, db), name: l.name, details: [l.composition, l.gsm && l.gsm + ' GSM', l.colour, l.description, l.unit].filter(Boolean).join(' · ') });
+      });
+    });
+    return out;
+  }
   function closureChecks(db, poolId) {
     const r = computePool(db, poolId);
     const p = r.pool;
@@ -2099,9 +2116,28 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     const p10 = r.errors.slice();
     if (!D(r.totals.inrReceived).gt(0)) p10.push('INR received is zero');
     add('profit', 'Profitability calculated successfully', !p10.length, p10, `#/profitability?pool=${p.id}`);
+    // 11 item verification — every costing item of every pool style must be ticked before closure
+    const vitems = poolItems(db, poolId);
+    const pv = vitems.filter((it) => !(p.verifiedItems && p.verifiedItems[it.key])).map((it) => `${it.styleRef} / ${it.categoryLabel} / ${it.name}`);
+    add('verified', 'All costing items verified (ticked)', !pv.length, pv, `#/closure?pool=${p.id}`);
     return { checks: chk, ok: chk.every((c) => c.ok), report: r };
   }
   svc.closureChecks = (poolId) => closureChecks(Store.db, poolId);
+  svc.poolItems = (poolId) => poolItems(Store.db, poolId);
+  svc.setItemVerified = (poolId, key, value) => mut('pools.edit', (db) => {
+    const p = must(db, 'pools', poolId, 'Pool');
+    if (['CLOSED', 'CANCELLED'].includes(p.status)) fail('Pool is ' + p.status.toLowerCase());
+    p.verifiedItems = p.verifiedItems || {};
+    if (value) p.verifiedItems[String(key)] = { by: Store.user.name, at: now() }; else delete p.verifiedItems[String(key)];
+    return p;
+  });
+  svc.setAllItemsVerified = (poolId, value) => mut('pools.edit', (db) => {
+    const p = must(db, 'pools', poolId, 'Pool');
+    if (['CLOSED', 'CANCELLED'].includes(p.status)) fail('Pool is ' + p.status.toLowerCase());
+    p.verifiedItems = {};
+    if (value) poolItems(db, poolId).forEach((it) => { p.verifiedItems[it.key] = { by: Store.user.name, at: now() }; });
+    return p;
+  });
   svc.closePool = (poolId, remarks) => mut('closure.close', (db) => {
     const p = must(db, 'pools', poolId, 'Pool');
     if (!['ACTIVE', 'REOPENED'].includes(p.status)) fail(`Pool is ${p.status.toLowerCase()} — only active or reopened pools can be closed`);
@@ -2251,7 +2287,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
   G.SP = G.SP || {};
   Object.assign(G.SP, {
     AppError, Store, svc, IDBAdapter, LocalStorageAdapter, MemoryAdapter, PERMS, ROLES, DEFAULT_ROLE_PERMS, can, requirePerm, categories, catLabel,
-    lineMetrics, rateOn, computePool, closureChecks, byId, uid, today, now, clone, parseCsv, emptyDb, IMPORTS,
+    lineMetrics, rateOn, computePool, closureChecks, poolItems, byId, uid, today, now, clone, parseCsv, emptyDb, IMPORTS,
   });
 })(typeof window !== 'undefined' ? window : globalThis);
 
@@ -2749,7 +2785,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     { path: 'expenses', label: 'Expense Management', icon: 'exp', perm: 'expenses.view' },
     { path: 'exceptions', label: 'Missing & Additional Items', icon: 'alert', perm: 'exceptions.view', count: () => Store.db.exceptions.filter((x) => x.status === 'PENDING').length },
     { path: 'shipments', label: 'Shipment Management', icon: 'ship', perm: 'shipments.view' },
-    { path: 'limits', label: 'Expense Limit Analysis', icon: 'limit', perm: ['reports.view', 'expenses.view'] },
+    { path: 'limits', label: 'Expense Limit', icon: 'limit', perm: ['reports.view', 'expenses.view'] },
     { path: 'profitability', label: 'Profitability Reports', icon: 'profit', perm: 'reports.view' },
     { path: 'closure', label: 'Pool Closure', icon: 'lock', perm: 'pools.view' },
     { grp: 'Administration' },
@@ -3923,8 +3959,8 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     view.insertAdjacentHTML('beforeend', `
       ${!editable ? `<div class="notice ${p.status === 'CLOSED' ? 'ok' : 'warn'}">${p.status === 'CLOSED' ? 'Pool is closed — expenses are read-only.' : p.status === 'DRAFT' ? 'Pool is a draft — activate it before entering expenses.' : 'Read-only: you do not have permission to edit expenses.'}</div>` : ''}
       <div class="kpis"><div class="kpi"><div class="l">Actual expenses (saved)</div><div class="v">${Fmt.inr(r.totals.totalActual)}</div></div><a class="kpi" href="#/limits?pool=${p.id}"><div class="l">Expense limits</div><div class="v">${Fmt.inr(r.totals.totalLimits)}</div></a><div class="kpi ${r.expenses.drafts ? 'warn' : ''}"><div class="l">Draft entries</div><div class="v">${r.expenses.drafts}</div></div><div class="kpi"><div class="l">Not fully paid</div><div class="v">${r.expenses.unpaid}</div></div></div>
-      <div class="card"><div class="hd"><h2>Quantities (kept separate)</h2></div><div class="bd p0"><div class="table-wrap"><table class="t"><thead><tr><th>Style</th><th class="num">Original order qty</th><th class="num">Pool-allocated qty</th><th class="num">CMT paid qty</th><th class="num">Shipped qty</th></tr></thead><tbody>
-        ${r.styles.map(qtyRow).map((x) => `<tr><td><b>${esc(x.styleRef)}</b></td><td class="num">${Fmt.qty(x.orderQty)}</td><td class="num">${Fmt.qty(x.allocQty)}</td><td class="num">${Fmt.qty(x.cmt)}</td><td class="num">${Fmt.qty(x.shipped)}</td></tr>`).join('')}
+      <div class="card"><div class="hd"><h2>Quantities</h2></div><div class="bd p0"><div class="table-wrap"><table class="t"><thead><tr><th>Style</th><th class="num">Original order qty</th><th class="num">Pool-allocated qty</th><th class="num">Shipped qty</th></tr></thead><tbody>
+        ${r.styles.map(qtyRow).map((x) => `<tr><td><b>${esc(x.styleRef)}</b></td><td class="num">${Fmt.qty(x.orderQty)}</td><td class="num">${Fmt.qty(x.allocQty)}</td><td class="num">${Fmt.qty(x.shipped)}</td></tr>`).join('')}
       </tbody></table></div></div></div>
       <div class="tabs" role="tablist">${cats.map((c) => { const n = exps.filter((e) => e.category === c.key).length; return `<button role="tab" class="${c.key === cat ? 'on' : ''}" data-cat="${c.key}" aria-selected="${c.key === cat}">${esc(c.label)}${n ? badge(n) : ''}</button>`; }).join('')}</div>
       <div class="card"><div class="hd"><h2>${esc(H.catLabel(cat))}</h2><span class="sec-total">${Fmt.inr(sum(exps.filter((e) => e.category === cat && e.status === 'SAVED'), (e) => D(e.amount)).toString())}</span>
@@ -3937,6 +3973,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
       columns: [
         { key: 'expNo', label: 'Entry', render: (e) => `<span class="mono">${esc(e.expNo)}</span>${testTag(e)}${e.attachment ? ' 📎' : ''}` },
         { key: 'style', label: 'Style', value: (e) => (e.styleId ? H.style(e.styleId).styleRef : 'Shared') },
+        ...(isF ? [{ key: 'fabClass', label: 'Cat', value: (e) => e.fabClass || 'Material', render: (e) => esc(e.fabClass || 'Material') }] : []),
         { key: 'itemName', label: isF ? 'Fabric' : isC ? 'CMT operation' : cat === 'APPLICATION' ? 'Application' : 'Item', wrap: true, render: (e) => `<b>${esc(e.itemName)}</b>${e.source === 'COSTING' ? ' ' + badge('costing', 'info') : ''}${e.colour || e.spec ? `<div class="small muted">${esc([e.colour, e.spec].filter(Boolean).join(' · '))}</div>` : ''}` },
         { key: 'qty', label: isF ? 'Used wt / qty' : 'Paid qty', num: true, render: (e) => `${Fmt.num(e.qty, isF ? 3 : 0)} ${esc(e.unit || '')}` },
         { key: 'rate', label: isF ? 'Rate / unit' : 'Rate / pc', num: true, render: (e) => Fmt.num(e.rate) },
@@ -3986,7 +4023,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
       title: `${e ? 'Edit' : 'Add'} ${H.catLabel(cat)} expense${e ? ' ' + e.expNo : ''} — ${p.poolNo}`, size: 'lg',
       body: `<div class="form-grid">
         ${isF || isA ? `<input type="hidden" name="styleId" value="${esc(v0.styleId || '')}">` : UI.field({ name: 'styleId', label: 'Style', type: 'select', options: styleOpts, placeholder: false, span: 's6' }, v0.styleId || '')}
-        ${UI.field({ name: 'costingPick', label: `Fetch from costing inputs`, type: 'select', options: [], placeholder: '— Manual entry —', span: 's6', help: can('expenses.edit') ? 'Or type a manual item below' : '' })}
+        ${isF ? UI.field({ name: 'fabClass', label: 'Material / Process / Others', type: 'select', options: ['Material', 'Process', 'Others'], placeholder: false, span: 's6' }, v0.fabClass || 'Material') : UI.field({ name: 'costingPick', label: `Fetch from costing inputs`, type: 'select', options: [], placeholder: '— Manual entry —', span: 's6', help: can('expenses.edit') ? 'Or type a manual item below' : '' })}
         ${UI.field({ name: 'itemName', label: isF ? 'Fabric' : isA ? 'Application type' : isC ? 'CMT operation / details' : 'Item / description', required: true, span: 's6' }, v0.itemName)}
         ${isF ? UI.field({ name: 'colour', label: 'Colour', span: 's3' }, v0.colour) + UI.field({ name: 'spec', label: 'Fabric specification', span: 's3' }, v0.spec) : UI.field({ name: 'spec', label: 'Details', span: 's6' }, v0.spec)}
         ${UI.field({ name: 'qty', label: isF ? 'Used weight / quantity' : 'Paid quantity', type: 'decimal', required: true, span: 's3', help: isF ? '' : '<span id="qtyHint"></span>' }, v0.qty)}
@@ -3995,7 +4032,6 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
         ${UI.field({ name: 'calc', label: 'Qty × rate', type: 'static', span: 's3', html: '<b id="eCalc">—</b>' })}
         ${UI.field({ name: 'billAmount', label: 'Bill amount (manual)', type: 'decimal', span: 's4', help: 'If entered, this is the actual expense; otherwise qty × rate is used' }, v0.billAmount)}
         ${UI.field({ name: 'act', label: 'Actual amount', type: 'static', span: 's4', html: '<b id="eAct">—</b>' })}
-        ${isF || isA ? `<div class="fld s12"><label>${isF ? 'Used quantity' : 'Paid quantity'} vs limit</label><div class="inp" style="background:var(--surface-2)"><span id="eLim" class="small muted">—</span></div><div class="help">Warning only — you can always save, even over the limit.</div></div>` : ''}
         ${isC ? UI.field({ name: 'factory', label: 'Factory', span: 's4' }, v0.factory) + UI.field({ name: 'sourcing', label: 'In-house / outsourced', type: 'select', options: [{ value: 'INHOUSE', label: 'In-house' }, { value: 'OUTSOURCED', label: 'Outsourced' }], required: true, span: 's4' }, v0.sourcing) : UI.field({ name: 'vendor', label: isA ? 'Party' : 'Vendor', span: 's4' }, v0.vendor)}
         ${UI.field({ name: 'billRef', label: 'Bill reference', span: 's4' }, v0.billRef)}
         ${UI.field({ name: 'billDate', label: 'Bill date', type: 'date', span: 's4' }, v0.billDate)}
@@ -4012,35 +4048,21 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     });
     const el = m.el; const S = (n) => $(`[name=${n}]`, el);
     let opts = [];
-    const fillOpts = () => { opts = costingOptions(r, cat, S('styleId').value); UI.setOptions(S('costingPick'), opts.map((o) => ({ value: o.key, label: o.label })), '', opts.length ? '— Manual entry —' : 'No costing items for this selection'); };
+    const fillOpts = () => { const cp = S('costingPick'); if (!cp) { opts = []; return; } opts = costingOptions(r, cat, S('styleId').value); UI.setOptions(cp, opts.map((o) => ({ value: o.key, label: o.label })), '', opts.length ? '— Manual entry —' : 'No costing items for this selection'); };
     const hint = () => {
       const h = $('#qtyHint', el); if (!h) return;
       const s = r.styles.find((x) => x.styleId === S('styleId').value);
       h.innerHTML = s ? `Pool qty for ${esc(s.styleRef)}: <a href="#" data-q="${s.allocQty}">${s.allocQty}</a>${s.refQty ? ` · reference: <a href="#" data-q="${s.refQty.qty}">${s.refQty.qty}</a>` : ''}` : `Pool total: <a href="#" data-q="${r.totals.orderQty}">${r.totals.orderQty}</a>`;
       $$('[data-q]', h).forEach((a) => (a.onclick = (ev) => { ev.preventDefault(); S('qty').value = a.dataset.q; upd(); }));
     };
-    // Applicable quantity limit for the selected costing item (fabric: alloc × consumption × (1+loss);
-    // application: alloc × allowance per piece). Summed across styles when the entry is shared.
-    function reqQ(l, sid) { const s = r.styles.find((x) => x.styleId === sid); if (!s) return null; const a = D(s.allocQty); return isF ? a.mul(D(l.qty || 0)).mul(D(1).add(D(l.allowancePct || 0).div(100))) : a.mul(D(l.qty || 0)); }
-    function limitQtyNow() { const o = opts.find((x) => x.key === S('costingPick').value); if (!o) return null; const sid = S('styleId').value; if (sid) return reqQ(o.l, sid); let tot = D(0), any = false; opts.forEach((x) => { if (x.l.name === o.l.name && (!isF || (x.l.gsm || '') === (o.l.gsm || ''))) { const qn = reqQ(x.l, x.styleId); if (qn) { tot = tot.add(qn); any = true; } } }); return any ? tot : reqQ(o.l, o.styleId); }
-    function limWarn() {
-      const e2 = $('#eLim', el); if (!e2) return;
-      const lq = limitQtyNow(); const dp = isF ? 3 : 0; const unit = S('unit').value || '';
-      const uv = S('qty').value.trim(); const used = SP.Dec.valid(uv) ? D(uv) : null;
-      if (lq === null) { e2.innerHTML = badge('No costing limit', 'warn') + ' Manual item — no predefined limit; the entry can still be saved.'; return; }
-      if (used === null) { e2.innerHTML = `Applicable limit <b>${Fmt.num(lq.toString(), dp)} ${esc(unit)}</b>`; return; }
-      const diff = used.sub(lq), over = diff.gt(0);
-      e2.innerHTML = `Limit <b>${Fmt.num(lq.toString(), dp)} ${esc(unit)}</b> · used <b>${Fmt.num(used.toString(), dp)} ${esc(unit)}</b> · ` + (over ? badge('Over limit', 'bad') + ` +${Fmt.num(diff.toString(), dp)} ${esc(unit)} (saving is still allowed)` : badge('Within limit', 'ok') + ` ${Fmt.num(diff.abs().toString(), dp)} ${esc(unit)} left`);
-    }
     const upd = () => {
       let calc = null;
       try { calc = D(S('qty').value || 0).mul(S('rate').value || 0).round(2).toString(); $('#eCalc', el).textContent = Fmt.inr(calc); } catch (x) { $('#eCalc', el).textContent = 'invalid'; }
       const b = S('billAmount').value.trim();
       $('#eAct', el).textContent = b ? (SP.Dec.valid(b) ? Fmt.inr(b) + ' (bill)' : 'invalid') : calc !== null ? Fmt.inr(calc) + ' (qty × rate)' : '—';
-      limWarn();
     };
-    S('styleId').addEventListener('change', () => { fillOpts(); hint(); limWarn(); });
-    S('costingPick').addEventListener('change', () => {
+    S('styleId').addEventListener('change', () => { fillOpts(); hint(); });
+    const cpEl = S('costingPick'); if (cpEl) cpEl.addEventListener('change', () => {
       const o = opts.find((x) => x.key === S('costingPick').value); if (!o) { S('source').value = 'MANUAL'; return; }
       S('itemName').value = o.l.name; S('rate').value = o.l.rate; if (o.l.unit) S('unit').value = isF ? (o.l.rateUnit || o.l.unit) : o.l.unit;
       if (isF) { S('colour').value = o.l.colour || ''; S('spec').value = [o.l.composition, o.l.gsm && o.l.gsm + ' GSM', o.l.description].filter(Boolean).join(' · '); }
@@ -4342,7 +4364,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
   /* ======================= EXPENSE LIMITS ======================= */
   App.route('limits', ['reports.view', 'expenses.view'], async (view, q) => {
     const p = q.pool ? byId(Store.db, 'pools', q.pool) : null;
-    view.innerHTML = pageHead('Expense Limit Analysis', 'Expense limit = applicable order qty × costing cost per piece × (1 + costing variance %). Difference = limit − actual (positive = under the limit).') + H.poolBar(view, q, 'limits', (x) => x.status !== 'CANCELLED');
+    view.innerHTML = pageHead('Expense Limit', 'Expense limit = applicable order qty × costing cost per piece × (1 + costing variance %). Difference = limit − actual (positive = under the limit).') + H.poolBar(view, q, 'limits', (x) => x.status !== 'CANCELLED');
     H.bindPoolBar(view, 'limits');
     if (!p) { view.insertAdjacentHTML('beforeend', '<div class="card">' + empty('Select a pool') + '</div>'); return; }
     const r = SP.computePool(Store.db, p.id); const v = r.variance;
@@ -4515,6 +4537,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     const canClose = ['ACTIVE', 'REOPENED'].includes(p.status);
     view.insertAdjacentHTML('beforeend', `
       <div class="notice ${p.status === 'CLOSED' ? 'ok' : c.ok ? 'ok' : 'warn'}">${p.status === 'CLOSED' ? `<b>${esc(p.poolNo)} is closed</b> (v${p.final ? p.final.version : ''}, ${fmtDT(p.closedAt)} by ${esc(p.closedBy)}). Financial records are locked.` : c.ok ? '<b>All checks passed.</b> The pool can be closed.' : `<b>${c.checks.filter((x) => !x.ok).length} check(s) pending.</b> Closure is blocked until every requirement is met.`}</div>
+      <div class="card"><div class="hd"><h2>Item verification</h2><span class="sec-total" id="vCount"></span>${canClose ? `<button class="btn sm" id="vAll" type="button">Verify all</button><button class="btn sm" id="vNone" type="button">Clear all</button>` : ''}</div><div class="bd small muted" style="padding-bottom:0">Tick every costing item of every style in the pool. All must be verified before the pool can be closed.</div><div class="bd p0"><div class="table-wrap"><table class="t"><thead><tr><th>Style</th><th>Category</th><th>Item</th><th class="hide-sm">Details</th><th>Verified</th></tr></thead><tbody id="vBody"></tbody></table></div></div></div>
       <div class="grid2"><div class="card"><div class="hd"><h2>Closure checklist</h2>${status(p.status)}</div><div class="bd p0"><ul class="checklist">${c.checks.map((x) => `<li><span class="ic ${x.ok ? 'ok' : 'bad'}">${x.ok ? '✓' : '!'}</span><div style="min-width:0"><b>${esc(x.label)}</b>${x.ok ? '' : `<ul>${x.problems.slice(0, 8).map((pr) => `<li>${esc(pr)}</li>`).join('')}${x.problems.length > 8 ? `<li>… ${x.problems.length - 8} more</li>` : ''}</ul><a class="small" href="${x.link}">Go to records →</a>`}</div></li>`).join('')}</ul></div></div>
       <div><div class="card"><div class="hd"><h2>Final figures (live)</h2></div><div class="bd">
         <div class="sumrow"><span>INR received</span><span class="num">${Fmt.inr(c.report.totals.inrReceived)}</span></div><div class="sumrow"><span>Total expense limits</span><span class="num">${Fmt.inr(c.report.totals.totalLimits)}</span></div><div class="sumrow"><span>Total actual expenses</span><span class="num">${Fmt.inr(c.report.totals.totalActual)}</span></div>
@@ -4528,6 +4551,15 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
       actions: () => act('snap', 'Snapshot') + act('print', '', '', 'print', false, 'Print'),
       on: { snap: (x) => showSnapshot(x), print: (x) => UI.printDoc(`Closure snapshot ${p.poolNo} v${x.version}`, snapshotHtml(x)) },
     });
+    const vBody = $('#vBody', view);
+    if (vBody) {
+      const vitems = svc.poolItems(p.id); const vmap = p.verifiedItems || {};
+      vBody.innerHTML = vitems.length ? vitems.map((it) => `<tr><td>${esc(it.styleRef)}</td><td>${esc(it.categoryLabel)}</td><td><b>${esc(it.name)}</b></td><td class="hide-sm small muted">${esc(it.details || '')}</td><td><input type="checkbox" data-vk="${esc(it.key)}" ${vmap[it.key] ? 'checked' : ''} ${canClose ? '' : 'disabled'}></td></tr>`).join('') : '<tr><td colspan="5" class="empty small">No costing items found for this pool\'s styles.</td></tr>';
+      const vc = $('#vCount', view); if (vc) vc.textContent = `${vitems.filter((it) => vmap[it.key]).length} / ${vitems.length} verified`;
+      $$('[data-vk]', vBody).forEach((cb) => (cb.onchange = () => run(null, async () => { await svc.setItemVerified(p.id, cb.dataset.vk, cb.checked); App.refresh(); })));
+      const va = $('#vAll', view); if (va) va.onclick = () => run(va, async () => { await svc.setAllItemsVerified(p.id, true); toast('All items verified', 'ok'); App.refresh(); });
+      const vn = $('#vNone', view); if (vn) vn.onclick = () => run(vn, async () => { await svc.setAllItemsVerified(p.id, false); App.refresh(); });
+    }
     const dc = $('#doClose', view);
     if (dc) dc.onclick = async () => { const rem = await ask(`Close ${p.poolNo}`, 'Closing remarks', { required: false, ok: 'Close pool', help: 'All checks are re-validated. An immutable snapshot of the final figures is saved and financial records are locked.' }); if (rem === null) return; run(dc, async () => { const cl = await svc.closePool(p.id, rem); toast(`${p.poolNo} closed (snapshot v${cl.version})`, 'ok'); }); };
     const dr = $('#doReopen', view);
@@ -4687,7 +4719,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
       save('sM', (c) => { const v = read(c); const split = (x) => x.split(',').map((y) => y.trim()).filter(Boolean); return { units: split(v.units), productTypes: split(v.productTypes), extraCategories: split(v.extraCategories), sizeSets: v.sizeSets.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => { const i = l.indexOf(':'); if (i < 0) throw new AppError(`Size set line "${l}" must be "Name: size1, size2"`); return { name: l.slice(0, i).trim(), sizes: split(l.slice(i + 1)) }; }) }; });
     } else if (tab === 'limits') {
       const v = s.variance;
-      sb.innerHTML = card('Expense limit & costing variance', `<div class="notice ${v.approved ? 'ok' : 'warn'}">${v.approved ? 'Method marked as <b>approved by the client</b>.' : '<b>Pending confirmation.</b> The source shows an "average costing difference" of −3.99% for BGPL-001 but does not show how it is derived. From the source prices the per-style differences are −8.98% (HRT-BABY-001: £1.65 vs £1.8127) and −3.12% (HRT-BABY-002: £2.00 vs £2.0644); simple average −6.05%, qty-weighted −5.60%, value-weighted −5.33%. Until confirmed, use the method below or set an approved per-pool override (Expense Limit Analysis).'}</div>
+      sb.innerHTML = card('Expense limit & costing variance', `<div class="notice ${v.approved ? 'ok' : 'warn'}">${v.approved ? 'Method marked as <b>approved by the client</b>.' : '<b>Pending confirmation.</b> The source shows an "average costing difference" of −3.99% for BGPL-001 but does not show how it is derived. From the source prices the per-style differences are −8.98% (HRT-BABY-001: £1.65 vs £1.8127) and −3.12% (HRT-BABY-002: £2.00 vs £2.0644); simple average −6.05%, qty-weighted −5.60%, value-weighted −5.33%. Until confirmed, use the method below or set an approved per-pool override (Expense Limit).'}</div>
         <p class="small muted">Limit per style × category = Σ(allocated qty × costing cost per piece) × (1 + variance %/100). Variance per order = (confirmed price × costing exchange rate − costing total INR) ÷ costing total INR.</p>` +
         form([{ name: 'method', label: 'Pool aggregation method', type: 'select', options: [{ value: 'SIMPLE_AVG', label: 'Simple average of style variances' }, { value: 'QTY_WEIGHTED', label: 'Quantity-weighted' }, { value: 'VALUE_WEIGHTED', label: 'Confirmed-value-weighted' }], placeholder: false, span: 's6' }, { name: 'scope', label: 'Scope', type: 'select', options: [{ value: 'POOL', label: 'One pool-level % for all styles (workbook)' }, { name: 'STYLE', value: 'STYLE', label: 'Each style uses its own %' }], placeholder: false, span: 's6' }, { name: 'approved', label: 'Method approved by the client', type: 'checkbox', span: 's12' }], v) +
         `<h3 style="margin:14px 0 6px">Apply the variance to these categories</h3><p class="small muted" style="margin-top:0">The workbook demonstrates Fabric, Application and CMT and notes “For all other category Trims, Labelling… same calculation”.</p><div style="display:flex;flex-wrap:wrap;gap:6px 18px">${H.cats().map((c) => `<label class="check"><input type="checkbox" data-vc="${c.key}" ${v.categories.includes(c.key) ? 'checked' : ''}> ${esc(c.label)}</label>`).join('')}</div>`, 'sV');
@@ -4754,7 +4786,8 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
       catch (e2) { root.innerHTML = `<div class="loading">Could not open storage: ${esc(e2.message)}. Private browsing may block it.</div>`; return; }
     }
 
-    if (SP._fbInfo && SP._fbInfo.subscribe) SP._fbInfo.subscribe(() => { if (!(App.dirty && App.dirty())) Store.reload(); });
+    // Live cross-device auto-reload is disabled: for a single owner it caused spurious save
+    // conflicts. Data still saves to Firebase on every change and loads fresh on page refresh.
     setTimeout(() => {
       const connected = !!(SP._fbInfo && Store.adapter && Store.adapter.connected);
       UI.toast(connected ? 'Connected to Firebase — data is saved to the cloud.' : 'Saved on this device; it will sync to Firebase once connected.', connected ? 'ok' : 'warn');
