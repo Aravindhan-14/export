@@ -868,7 +868,10 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
         await T(io.setDoc(io.docRef, { json: JSON.stringify(db), rev: db.meta.rev, updatedAt: io.serverTimestamp() }), 7000);
       },
       async save(db, expectedRev) {
-        await LS.save(db, expectedRev); // local first: never lose data, works offline
+        // Firebase is authoritative and written FIRST under an optimistic lock. On a conflict we
+        // throw before touching local, so Store reloads the true latest from the server and retries
+        // — a stale write can never drop records saved a moment earlier.
+        let online = true;
         try {
           await T(io.runTransaction(io.db, async (tx) => {
             const snap = await tx.get(io.docRef);
@@ -877,10 +880,12 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
           }), 8000);
           this.connected = true; this.lastError = null;
         } catch (e) {
-          if (e.code === 'CONFLICT') throw e; // let Store reload the newer Firebase copy
-          this.connected = false; this.lastError = e && e.message;
-          if (G.console) console.warn('Firebase save failed — kept in local storage:', e && e.message);
+          if (e.code === 'CONFLICT') throw e; // server has newer data — Store reloads from server and retries
+          online = false; this.connected = false; this.lastError = e && e.message;
+          if (G.console) console.warn('Firebase offline — saving on this device:', e && e.message);
         }
+        if (online) { try { localStorage.setItem(LS.key, JSON.stringify(db)); } catch (e) {} } // mirror to local cache (Firebase wins)
+        else { await LS.save(db, expectedRev); } // offline: local is the store, keep its optimistic lock
       },
     };
     return adapter;
@@ -4851,8 +4856,10 @@ const resolve = (window.SP && window.SP._resolveFirebase) || (() => {});
       await new Promise((res) => { const off = onAuthStateChanged(auth, (u) => { if (u) { off(); res(); } }); signInAnonymously(auth).catch(() => { off(); res(); }); setTimeout(res, 5000); });
     } catch (e) { console.warn('Firebase anonymous auth unavailable:', e && e.message); }
 
-    // Use a SERVER read (not the offline cache) so "not connected" is detected reliably.
-    const adapter = window.SP.FirestoreMirrorAdapter({ db, docRef, getDoc, setDoc, runTransaction, serverTimestamp });
+    // Always read from the SERVER (not the offline cache) so a reload/retry gets the true latest
+    // document (with every saved expense) before writing — this prevents a stale write from
+    // dropping records that were saved a moment earlier.
+    const adapter = window.SP.FirestoreMirrorAdapter({ db, docRef, getDoc: getDocFromServer || getDoc, setDoc, runTransaction, serverTimestamp });
     // Live cross-device updates: re-read when another device writes a newer revision.
     const subscribe = (cb) => onSnapshot(docRef, (snap) => {
       try {
