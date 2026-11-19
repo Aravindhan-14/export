@@ -837,59 +837,134 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
 
   /** Firestore mirror adapter — saves the whole database to Firebase (Cloud Firestore)
       AND to localStorage. Local storage is the offline cache and the fallback when
-      Firebase is unreachable, so the app keeps working with no network. The entire
-      database is stored as one JSON string in a single document to avoid Firestore's
-      nested-array / field-name limits; optimistic locking uses meta.rev, exactly like
-      the other adapters. `io` carries the Firestore SDK functions (passed from the
-      Firebase module so this classic script needs no imports of its own). */
+      Firebase is unreachable, so the app keeps working with no network.
+
+      DATA-LOSS FIXES:
+      1. Firestore allows max 1 MB per document. Style images and bill attachments are stored
+         inside the database, so the JSON easily grows past 1 MB — every Firebase save then failed.
+         The JSON is now split across several documents (costing/app + costing/app_part_N).
+      2. When a Firebase save fails, the change is kept on this device and marked "pending"
+         (with the server revision it was based on). Previously the NEXT save hit a revision
+         conflict, reloaded the older Firebase copy and silently dropped the earlier entry
+         ("old entry disappears when a new one is added"). Now pending local data always wins
+         over an unchanged server copy, and is merged (never dropped) if the server changed.
+      `io` carries the Firestore SDK functions (passed from the Firebase module). */
+  const PENDING_KEY = 'sportspro-costing-pending';
+  const CHUNK = 300000; // chars per Firestore doc (worst case 3 bytes/char = 900 KB < 1 MiB limit)
+  /** Union two databases record-by-record so nothing saved on either side is lost. */
+  function mergeDb(remote, local) {
+    const out = clone(remote);
+    COLLS.forEach((c) => {
+      const r = Array.isArray(out[c]) ? out[c] : (out[c] = []);
+      const idx = new Map(r.map((x, i) => [x && x.id, i]));
+      (local[c] || []).forEach((x) => {
+        if (!x || !x.id) return;
+        if (!idx.has(x.id)) { r.push(clone(x)); return; }
+        const i = idx.get(x.id), y = r[i];
+        if (String(x.updatedAt || x.at || '') > String(y.updatedAt || y.at || '')) r[i] = clone(x);
+      });
+    });
+    out.meta = out.meta || {}; out.meta.seq = out.meta.seq || {};
+    const ls = (local.meta && local.meta.seq) || {};
+    Object.keys(ls).forEach((k) => { out.meta.seq[k] = Math.max(out.meta.seq[k] || 0, ls[k] || 0); });
+    return out;
+  }
   function FirestoreMirrorAdapter(io) {
     const LS = LocalStorageAdapter;
     // Never let a hanging Firebase call freeze the app: every network call settles within `ms`.
     const T = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => { const e = new Error('Firebase timed out'); e.code = 'TIMEOUT'; rej(e); }, ms))]);
+    const getPending = () => { try { return JSON.parse(localStorage.getItem(PENDING_KEY) || 'null'); } catch (e) { return null; } };
+    const setPending = (base) => { try { localStorage.setItem(PENDING_KEY, JSON.stringify({ base, at: now() })); } catch (e) {} };
+    const clearPending = () => { try { localStorage.removeItem(PENDING_KEY); } catch (e) {} };
+    const readLocal = () => { try { return JSON.parse(localStorage.getItem(LS.key) || 'null'); } catch (e) { return null; } };
+    const writeLocal = (db) => { try { localStorage.setItem(LS.key, JSON.stringify(db)); return true; } catch (e) { return false; } };
+    const partRef = (i) => (io.partRef ? io.partRef(i) : null);
+    const chunks = (db) => { const s = JSON.stringify(db), out = []; for (let i = 0; i < s.length; i += CHUNK) out.push(s.slice(i, i + CHUNK)); return out.length ? out : ['']; };
     const adapter = {
       io, lastError: null, connected: false,
+      /** Read the full database from the server (main doc + any part docs). */
+      async _read() {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const snap = await T(io.getDoc(io.docRef), 8000);
+          if (!snap.exists()) return null;
+          const d = snap.data(), n = d.parts || 1, parts = [d.json];
+          let torn = false;
+          for (let i = 1; i < n; i++) {
+            const ps = await T(io.getDoc(partRef(i)), 8000);
+            if (!ps.exists() || ps.data().rev !== d.rev) { torn = true; break; } // written mid-read — retry
+            parts.push(ps.data().json);
+          }
+          if (!torn) return JSON.parse(parts.join(''));
+        }
+        throw new Error('Firebase data is being updated — please retry');
+      },
+      /** Write db under an optimistic lock: the server rev must equal `baseRev` (null = no check). */
+      async _write(db, baseRev) {
+        const parts = chunks(db);
+        if (parts.length > 1 && !io.partRef) { const e = new Error('Database too large for one Firebase document'); e.code = 'SIZE'; throw e; }
+        await T(io.runTransaction(io.db, async (tx) => {
+          const snap = await tx.get(io.docRef);
+          if (snap.exists() && baseRev !== null && snap.data().rev !== baseRev) { const e = new Error('conflict'); e.code = 'CONFLICT'; throw e; }
+          tx.set(io.docRef, { json: parts[0], parts: parts.length, rev: db.meta.rev, updatedAt: io.serverTimestamp() });
+          for (let i = 1; i < parts.length; i++) tx.set(partRef(i), { json: parts[i], rev: db.meta.rev });
+        }), 15000);
+      },
+      async _put(db) { await this._write(db, null); },
       async load() {
         let remote;
-        try {
-          const snap = await T(io.getDoc(io.docRef), 7000);
-          remote = snap.exists() ? JSON.parse(snap.data().json) : null;
-          this.connected = true; this.lastError = null;
-        } catch (e) {
+        try { remote = await this._read(); this.connected = true; this.lastError = null; }
+        catch (e) {
           this.connected = false; this.lastError = e && e.message;
-          return LS.load(); // Firebase blocked/offline → use local cache
+          return LS.load(); // Firebase blocked/offline → use local cache (includes pending changes)
         }
-        if (remote) { try { localStorage.setItem(LS.key, JSON.stringify(remote)); } catch (e) {} return remote; }
+        const pending = getPending(), local = readLocal();
+        if (pending && local) {
+          // This device has changes Firebase never received — never replace them with the older server copy.
+          let db = local, base = pending.base;
+          if (remote && remote.meta.rev !== pending.base) {
+            // Server changed meanwhile (another device): merge both so no record is lost.
+            db = mergeDb(remote, local);
+            db.meta.rev = Math.max(remote.meta.rev, local.meta.rev) + 1;
+            base = remote.meta.rev;
+          }
+          try { await this._write(db, remote ? base : null); clearPending(); }
+          catch (e) { if (G.console) console.warn('Pending changes not yet synced to Firebase:', e && e.message); setPending(remote ? base : null); }
+          writeLocal(db);
+          return db;
+        }
+        if (remote) { writeLocal(remote); return remote; }
         // Firebase reachable but empty → push the existing local database up (first-time migration)
-        const local = await LS.load();
-        if (local) { try { await this._put(local); } catch (e) { this.lastError = e && e.message; } }
-        return local;
-      },
-      async _put(db) {
-        await T(io.setDoc(io.docRef, { json: JSON.stringify(db), rev: db.meta.rev, updatedAt: io.serverTimestamp() }), 7000);
+        const l = await LS.load();
+        if (l) { try { await this._put(l); } catch (e) { this.lastError = e && e.message; } }
+        return l;
       },
       async save(db, expectedRev) {
-        // Firebase is authoritative and written FIRST under an optimistic lock. On a conflict we
-        // throw before touching local, so Store reloads the true latest from the server and retries
-        // — a stale write can never drop records saved a moment earlier.
-        let online = true;
+        // While this device holds unsynced changes, the server is still at pending.base — lock on that.
+        const pending = getPending();
+        const base = pending ? pending.base : expectedRev;
         try {
-          await T(io.runTransaction(io.db, async (tx) => {
-            const snap = await tx.get(io.docRef);
-            if (snap.exists() && expectedRev !== null && snap.data().rev !== expectedRev) { const e = new Error('conflict'); e.code = 'CONFLICT'; throw e; }
-            tx.set(io.docRef, { json: JSON.stringify(db), rev: db.meta.rev, updatedAt: io.serverTimestamp() });
-          }), 8000);
+          await this._write(db, base);
           this.connected = true; this.lastError = null;
+          clearPending();
+          writeLocal(db); // mirror to local cache
+          return;
         } catch (e) {
-          if (e.code === 'CONFLICT') throw e; // server has newer data — Store reloads from server and retries
-          online = false; this.connected = false; this.lastError = e && e.message;
-          if (G.console) console.warn('Firebase offline — saving on this device:', e && e.message);
+          if (e.code === 'CONFLICT') {
+            if (!pending) throw e; // server has newer data — Store reloads (merging pending) and retries
+            // Server changed while we were offline: local still holds the earlier pending changes;
+            // Store reloads → load() merges them with the server copy, then re-applies this change.
+            throw e;
+          }
+          this.connected = false; this.lastError = e && e.message;
+          if (G.console) console.warn('Firebase save failed — kept on this device, will sync later:', e && e.message);
         }
-        if (online) { try { localStorage.setItem(LS.key, JSON.stringify(db)); } catch (e) {} } // mirror to local cache (Firebase wins)
-        else { await LS.save(db, expectedRev); } // offline: local is the store, keep its optimistic lock
+        await LS.save(db, expectedRev); // offline: local is the store, keep its optimistic lock
+        if (!pending) setPending(expectedRev);
       },
     };
     return adapter;
   }
+  G.SP.mergeDb = mergeDb;
   // Resolved by the Firebase module at the end of the page with { adapter } or null.
   G.SP = G.SP || {};
   G.SP.firebaseReady = new Promise((res) => { G.SP._resolveFirebase = res; });
@@ -4859,7 +4934,8 @@ const resolve = (window.SP && window.SP._resolveFirebase) || (() => {});
     // Always read from the SERVER (not the offline cache) so a reload/retry gets the true latest
     // document (with every saved expense) before writing — this prevents a stale write from
     // dropping records that were saved a moment earlier.
-    const adapter = window.SP.FirestoreMirrorAdapter({ db, docRef, getDoc: getDocFromServer || getDoc, setDoc, runTransaction, serverTimestamp });
+    const partRef = (i) => doc(db, 'costing', 'app_part_' + i); // overflow docs (Firestore limit is 1 MB per doc)
+    const adapter = window.SP.FirestoreMirrorAdapter({ db, docRef, partRef, getDoc: getDocFromServer || getDoc, setDoc, runTransaction, serverTimestamp });
     // Live cross-device updates: re-read when another device writes a newer revision.
     const subscribe = (cb) => onSnapshot(docRef, (snap) => {
       try {
