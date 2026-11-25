@@ -186,6 +186,14 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
 .sec-total{font-weight:700;font-variant-numeric:tabular-nums}
 
 /* fabric rate build-up (material / process costing) */
+.shadj{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px}
+.shadj-col{border:1px solid var(--border);border-radius:8px;padding:8px 10px;background:var(--surface-2);min-width:0}
+.shadj-hd{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+.adjrow{display:grid;grid-template-columns:minmax(0,1fr) 120px auto;gap:6px;align-items:center;margin-top:6px}
+.adjrow .inp{min-width:0;min-height:32px;padding:5px 8px}
+.shadj-net{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:8px;font-size:13px;color:var(--muted)}
+.shadj-net b{color:var(--text)} .shadj-net .tot b{color:var(--brand);font-size:15px}
+@media (max-width: 560px){ .shadj{grid-template-columns:minmax(0,1fr)} .adjrow{grid-template-columns:minmax(0,1fr) 96px auto} }
 .fb-h{margin:2px 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
 .fb-off{display:flex;gap:10px 14px;align-items:center;justify-content:space-between;flex-wrap:wrap;padding:12px;border:1px dashed var(--border-strong);border-radius:8px;margin-bottom:16px}
 .fb-acts{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 12px}
@@ -524,6 +532,14 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     adjustedInr(totalInr, additions, deductions) {
       return D(totalInr).add(additions || 0).sub(deductions || 0).round(RULES.money);
     },
+
+    /** A costing percentage component is "rejection" (added to expense limits) when ticked
+        (p.rej === true) or, if never set, when its name is just "Rej" / "Rejection". */
+    isRejection(p) { return !!p && (p.rej === true || (p.rej === undefined && /^\s*rej(ection)?\.?\s*%?\s*$/i.test(String(p.name || '')))); },
+    /** Total rejection % of a costing version. */
+    rejectionPct(version) { return sum((version && version.percentages) || [], (p) => (Calc.isRejection(p) ? D(p.pct || 0) : D(0))); },
+    /** Expense-limit cost per piece = costing cost / pc (incl. allowance %) × (1 + Rej % / 100). */
+    limitCostPerPiece(costPerPiece, rejPct) { return D(costPerPiece || 0).mul(D(1).add(D(rejPct || 0).div(100))); },
 
     /** Per-style costing variance %:
         (Confirmed price × costing exchange rate − Costing Total INR) / Costing Total INR × 100.
@@ -1250,7 +1266,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     if ('numberFormat' in patch) s.numberFormat = patch.numberFormat === 'indian' ? 'indian' : 'western';
     if ('poolPrefix' in patch) { const p = reqStr(patch.poolPrefix, 'poolPrefix', 'Pool prefix', 10).toUpperCase(); if (!/^[A-Z0-9]+$/.test(p)) fail('Prefix may contain only letters and digits', 'poolPrefix'); s.poolPrefix = p; }
     if ('fabricLossPct' in patch) s.fabricLossPct = dec(patch.fabricLossPct, 'fabricLossPct', 'Fabric loss %', { max: 100 });
-    if ('defaultPercentages' in patch) s.defaultPercentages = patch.defaultPercentages.map((p, i) => ({ name: reqStr(p.name, 'pct' + i, 'Percentage name'), pct: dec(p.pct, 'pct' + i, 'Percentage'), basis: p.basis === 'CUMULATIVE' ? 'CUMULATIVE' : 'ITEMS' }));
+    if ('defaultPercentages' in patch) s.defaultPercentages = patch.defaultPercentages.map((p, i) => ({ name: reqStr(p.name, 'pct' + i, 'Percentage name'), pct: dec(p.pct, 'pct' + i, 'Percentage'), basis: p.basis === 'CUMULATIVE' ? 'CUMULATIVE' : 'ITEMS', rej: Calc.isRejection(p) }));
     ['units', 'productTypes', 'extraCategories'].forEach((k) => {
       if (k in patch) {
         const list = patch[k].map(str).filter(Boolean);
@@ -1446,7 +1462,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     });
   }
   function cleanPercentages(list) {
-    return (list || []).map((p, i) => ({ id: p.id || uid(), name: reqStr(p.name, 'pct' + i, 'Percentage name'), pct: dec(p.pct, 'pct' + i, `${p.name || 'Percentage'} %`), basis: p.basis === 'CUMULATIVE' ? 'CUMULATIVE' : 'ITEMS' }));
+    return (list || []).map((p, i) => ({ id: p.id || uid(), name: reqStr(p.name, 'pct' + i, 'Percentage name'), pct: dec(p.pct, 'pct' + i, `${p.name || 'Percentage'} %`), basis: p.basis === 'CUMULATIVE' ? 'CUMULATIVE' : 'ITEMS', rej: Calc.isRejection(p) }));
   }
   function recompute(db, v) {
     const r = Calc.costing(v, categories(db));
@@ -1939,6 +1955,12 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     const reason = optStr(data.differenceReason, 500);
     if (isFinal && diff !== 0 && !reason) fail(`Order ${l.orderQty} vs shipped ${cumulative}: ${diff < 0 ? 'shortage' : 'excess'} of ${Math.abs(diff)} pcs — a reason is required`, 'differenceReason');
     const invoiceRef = optStr(data.invoiceRef, 80);
+    // Addition / deduction line items on the shipment bill (e.g. "Cut to check: 691 × 134.5"): editable, each needs a description and amount.
+    const existing = data.id ? byId(db, 'shipments', data.id) : null;
+    const lineItems = (arr, label) => (Array.isArray(arr) ? arr : []).filter((x) => str(x.desc) || str(x.amount)).map((x, i) => ({ id: x.id || uid(), desc: reqStr(x.desc, 'shipAdj', `${label} ${i + 1}: description`, 300), amount: dec(x.amount, 'shipAdj', `${label} ${i + 1}: amount`, { gt: true, dp: 2 }) }));
+    const shAdd = data.additions === undefined && existing ? existing.additions || [] : lineItems(data.additions, 'Addition');
+    const shDed = data.deductions === undefined && existing ? existing.deductions || [] : lineItems(data.deductions, 'Deduction');
+    const netInr = Calc.adjustedInr(v.inr, sum(shAdd, (x) => D(x.amount)), sum(shDed, (x) => D(x.amount))).toString();
     const dup = others.find((s) => (invoiceRef && lc(s.invoiceRef) === lc(invoiceRef)) || (!invoiceRef && !s.invoiceRef && s.shipmentDate === shipmentDate && s.shippedQty === qty));
     if (dup) fail(`Possible duplicate of shipment ${dup.shipNo} (same ${invoiceRef ? 'invoice reference' : 'date and quantity'}) for this order line`, invoiceRef ? 'invoiceRef' : 'shipmentDate');
     const fields = {
@@ -1946,6 +1968,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
       unitPrice, currency: l.currency, exchangeRate, rateDate, rateId, rateSource: rateId ? 'TABLE' : 'MANUAL',
       foreignValue: v.foreign, inrValue: v.inr, isFinal, cumulativeShipped: cumulative, diffQty: diff,
       differenceReason: reason, excessAccepted, excessRef: excessAccepted ? optStr(data.excessRef, 100) : '', invoiceRef, remarks: optStr(data.remarks),
+      additions: shAdd, deductions: shDed, netInr,
       calcMethod: 'Foreign = Qty × Confirmed Price; INR = Foreign × Rate (2 dp)',
     };
     if (data.id) {
@@ -1966,11 +1989,29 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
   /* ---------- Additions / deductions ---------- */
   svc.saveAdjustment = (data) => mut('adjustments.edit', (db) => {
     const p = must(db, 'pools', data.poolId, 'Pool'); assertPoolEditable(db, p.id, 'adjustments');
+    const type = data.type === 'DEDUCTION' ? 'DEDUCTION' : 'ADDITION';
+    // Addition items may be entered as quantity × rate (e.g. 210 pcs × ₹100); otherwise the amount is entered directly.
+    const qty = 'qty' in data && str(data.qty) !== '' ? dec(data.qty, 'qty', 'Quantity', { min: 0, dp: 4 }) : null;
+    const rate = 'rate' in data && str(data.rate) !== '' ? dec(data.rate, 'rate', 'Rate', { min: 0, dp: 4 }) : null;
+    let amount;
+    if (qty !== null && rate !== null) { amount = D(qty).mul(rate).round(2).toString(); if (!D(amount).gt(0)) fail('Amount (quantity × rate) must be greater than zero', 'amount'); }
+    else amount = dec(data.amount, 'amount', 'Amount (INR)', { gt: true, dp: 2 });
+    const itemName = optStr(data.itemName, 200);
     const fields = {
-      poolId: p.id, type: data.type === 'DEDUCTION' ? 'DEDUCTION' : 'ADDITION',
-      amount: dec(data.amount, 'amount', 'Amount (INR)', { gt: true, dp: 2 }), reason: reqStr(data.reason, 'reason', 'Reason', 500),
+      poolId: p.id, type, amount,
+      reason: str(data.reason) ? reqStr(data.reason, 'reason', 'Reason', 500) : reqStr(itemName, type === 'ADDITION' ? 'itemName' : 'reason', type === 'ADDITION' ? 'Item / details' : 'Deduction reason', 500),
       date: date(data.date, 'date', 'Date'), reference: optStr(data.reference, 100),
     };
+    // Extended fields (Addition & Deduction page) are only written when supplied, so older edit forms never wipe them.
+    if ('itemName' in data) fields.itemName = itemName;
+    if ('details' in data) fields.details = optStr(data.details, 300);
+    if ('disposition' in data) fields.disposition = ['STOCK', 'DISPOSED'].includes(data.disposition) ? data.disposition : null;
+    if ('qty' in data) { fields.qty = qty; fields.unit = optStr(data.unit, 20); fields.rate = rate; }
+    if ('styleId' in data) {
+      const sid = data.styleId || null;
+      if (sid && !db.allocations.some((a) => a.poolId === p.id && a.status === 'ACTIVE' && (byId(db, 'lines', a.lineId) || {}).styleId === sid)) fail('Style is not part of this pool', 'styleId');
+      fields.styleId = sid;
+    }
     if (data.id) {
       const x = must(db, 'adjustments', data.id, 'Adjustment'); const before = clone(x);
       Object.assign(x, fields, { updatedAt: now() }); audit(db, 'UPDATE', 'Adjustment', x, before); return x;
@@ -2035,12 +2076,14 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     styleMap.forEach((s) => {
       const vp = pctFor(s.style.id);
       cats.forEach((c) => {
-        let base = D(0); let anyCost = false;
+        let base = D(0); let anyCost = false; let rejW = D(0);
         s.rows.forEach((x) => {
           if (!x.costing || !x.costing.results) return;
           const cpp = D(x.costing.results.categories[c.key] || 0);
           if (!cpp.isZero()) anyCost = true;
-          base = base.add(D(x.a.qty).mul(cpp));
+          const rp = Calc.rejectionPct(x.costing); // costing input (incl. allowance %) + Rej %
+          base = base.add(D(x.a.qty).mul(Calc.limitCostPerPiece(cpp, rp)));
+          rejW = rejW.add(D(x.a.qty).mul(rp));
         });
         const apply = vset.categories.includes(c.key);
         const limit = base.mul(D(1).add(apply ? D(vp).div(100) : D(0))).round(2);
@@ -2049,7 +2092,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
         const d = Calc.expenseDifference(limit, actual);
         limits.push({
           styleId: s.style.id, styleRef: s.style.styleRef, category: c.key, categoryLabel: c.label, qty: s.allocQty,
-          costPerPiece: s.allocQty ? base.div(s.allocQty).round(2).toString() : '0', variancePct: apply ? vp : '0', varianceApplied: apply,
+          costPerPiece: s.allocQty ? base.div(s.allocQty).round(2).toString() : '0', rejPct: s.allocQty ? rejW.div(s.allocQty).round(4).toString() : '0', variancePct: apply ? vp : '0', varianceApplied: apply,
           limit: limit.toString(), actual: actual.toString(), diff: d.diff, diffPct: d.pct, status: d.status,
         });
       });
@@ -2085,13 +2128,17 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     const foreignByCur = {};
     ships.forEach((s) => { foreignByCur[s.currency] = D(foreignByCur[s.currency] || 0).add(s.foreignValue).toString(); });
     const adjs = db.adjustments.filter((x) => x.poolId === poolId && !x.deletedAt);
-    const additions = sum(adjs.filter((x) => x.type === 'ADDITION'), (x) => D(x.amount));
-    const deductions = sum(adjs.filter((x) => x.type === 'DEDUCTION'), (x) => D(x.amount));
+    const poolAdd = sum(adjs.filter((x) => x.type === 'ADDITION'), (x) => D(x.amount));
+    const poolDed = sum(adjs.filter((x) => x.type === 'DEDUCTION'), (x) => D(x.amount));
+    const shipAdd = sum(ships, (s) => sum(s.additions || [], (x) => D(x.amount)));
+    const shipDed = sum(ships, (s) => sum(s.deductions || [], (x) => D(x.amount)));
+    const additions = poolAdd.add(shipAdd);
+    const deductions = poolDed.add(shipDed);
     const inrReceived = Calc.adjustedInr(totalInrShip, additions, deductions);
     const margins = Calc.margins({ inrReceived, totalLimits, totalActual });
     // ---- style-wise profitability (pool-level adjustments & shared expenses are NOT allocated to styles) ----
     const styleProfit = Array.from(styleMap.values()).map((s) => {
-      const inr = sum(ships.filter((x) => x.styleId === s.style.id), (x) => D(x.inrValue));
+      const inr = sum(ships.filter((x) => x.styleId === s.style.id), (x) => D(x.inrValue).add(sum(x.additions || [], (a) => D(a.amount))).sub(sum(x.deductions || [], (a) => D(a.amount))));
       const lim = sum(limits.filter((l) => l.styleId === s.style.id), (l) => D(l.limit));
       const act = sum(limits.filter((l) => l.styleId === s.style.id), (l) => D(l.actual));
       return { styleId: s.style.id, styleRef: s.style.styleRef, description: s.style.description, allocQty: s.allocQty, shipped: ships.filter((x) => x.styleId === s.style.id).reduce((a, x) => a + x.shippedQty, 0), inr: inr.toString(), limit: lim.toString(), actual: act.toString(), budgetMargin: inr.sub(lim).toString(), actualMargin: inr.sub(act).toString() };
@@ -2104,7 +2151,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
       variance: { method: vset.method, scope: vset.scope, approved: vset.approved, categories: vset.categories, computedPoolPct, override, styles: styleVar, applied: override ? override.pct : vset.scope === 'STYLE' ? 'per style' : computedPoolPct },
       limits, byCat, expenses: { saved: saved.length, drafts: drafts.length, draftList: drafts, unpaid: saved.filter((e) => e.paymentStatus !== 'PAID').length },
       shipments: { rows: summaryRows, list: ships, totalQty: ships.reduce((a, s) => a + s.shippedQty, 0), foreignByCur, totalInr: totalInrShip.toString() },
-      adjustments: { list: adjs, additions: additions.toString(), deductions: deductions.toString() },
+      adjustments: { list: adjs, additions: poolAdd.toString(), deductions: poolDed.toString(), shipAdditions: shipAdd.toString(), shipDeductions: shipDed.toString() },
       totals: {
         orderQty: allocs.reduce((a, x) => a + x.a.qty, 0), shippedQty: ships.reduce((a, s) => a + s.shippedQty, 0),
         shipmentInr: totalInrShip.toString(), additions: additions.toString(), deductions: deductions.toString(),
@@ -2863,7 +2910,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     { path: 'pools', label: 'Order Pool Management', icon: 'pool', perm: 'pools.view' },
     { grp: 'Pool operations' },
     { path: 'expenses', label: 'Expense Management', icon: 'exp', perm: 'expenses.view' },
-    { path: 'exceptions', label: 'Missing & Additional Items', icon: 'alert', perm: 'exceptions.view', count: () => Store.db.exceptions.filter((x) => x.status === 'PENDING').length },
+    { path: 'adjustments', label: 'Addition & Deduction', icon: 'plus', perm: 'shipments.view' },
     { path: 'shipments', label: 'Shipment Management', icon: 'ship', perm: 'shipments.view' },
     { path: 'limits', label: 'Expense Limit', icon: 'limit', perm: ['reports.view', 'expenses.view'] },
     { path: 'profitability', label: 'Profitability Reports', icon: 'profit', perm: 'reports.view' },
@@ -3057,7 +3104,9 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     seasonOpts: () => Array.from(new Set(Store.db.styles.map((s) => s.season).concat(Store.db.pools.map((p) => p.season)).filter(Boolean))).sort().map((s) => ({ value: s, label: s })),
     styleOpts: (buyerId, includeArchived) => Store.db.styles.filter((s) => (!buyerId || s.buyerId === buyerId) && (includeArchived || s.status !== 'ARCHIVED')).sort((a, b) => a.styleRef.localeCompare(b.styleRef)).map((s) => ({ value: s.id, label: `${s.styleRef} — ${s.description || ''} [${s.season}]` })),
     currencyOpts: () => Store.db.currencies.filter((c) => c.active !== false).map((c) => ({ value: c.code, label: `${c.code} — ${c.name}` })),
-    poolOpts: (pred) => Store.db.pools.filter((p) => !pred || pred(p)).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map((p) => ({ value: p.id, label: `${p.poolNo} — ${H.buyer(p.buyerId).name} [${p.status}]` })),
+    poolOpts: (pred) => Store.db.pools.filter((p) => !pred || pred(p)).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map((p) => { const st = H.poolStyleRefs(p.id); return { value: p.id, label: `${p.poolNo} — ${H.buyer(p.buyerId).name} [${p.status}]${st.length ? ' · ' + st.join(', ') : ''}` }; }),
+    /** Style references allocated to a pool — lets the pool search find pools by style. */
+    poolStyleRefs: (poolId) => Array.from(new Set(Store.db.allocations.filter((a) => a.poolId === poolId && a.status === 'ACTIVE').map((a) => (byId(Store.db, 'lines', a.lineId) || {}).styleId).filter(Boolean))).map((id) => H.style(id).styleRef),
     lineLabel: (l) => `${l.confNo} · ${H.po(l.poId).poNumber} · ${H.style(l.styleId).styleRef} · ${l.combo}`,
     cats: () => SP.categories(),
     catLabel: (k) => SP.catLabel(k),
@@ -3065,7 +3114,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     poolBar(view, q, route, pred, extra) {
       const opts = H.poolOpts(pred || ((p) => p.status !== 'CANCELLED'));
       const sel = q.pool && opts.some((o) => o.value === q.pool) ? q.pool : '';
-      return `<div class="filters noprint"><div class="fld" style="flex:1 1 320px;max-width:460px"><label for="poolSel">Pool</label><select id="poolSel" data-search>${'<option value="">— Select a pool —</option>' + opts.map((o) => `<option value="${o.value}"${o.value === sel ? ' selected' : ''}>${esc(o.label)}</option>`).join('')}</select></div>${extra || ''}</div>`;
+      return `<div class="filters noprint"><div class="fld" style="flex:1 1 320px;max-width:460px"><label for="poolSel">Pool — search by pool no., buyer or style</label><select id="poolSel" data-search>${'<option value="">— Select a pool —</option>' + opts.map((o) => `<option value="${o.value}"${o.value === sel ? ' selected' : ''}>${esc(o.label)}</option>`).join('')}</select></div>${extra || ''}</div>`;
     },
     bindPoolBar(view, route) { const s = $('#poolSel', view); UI.enhance(view); if (s) s.addEventListener('change', () => App.go(route, { pool: s.value })); },
     poolStatus: (p) => status(p.status) + testTag(p),
@@ -3293,9 +3342,9 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
       initialFilters: { styleId: q.style || '' },
       filters: [{ key: 'styleId', label: 'Style', options: () => H.styleOpts(null, true) }, { key: 'buyer', label: 'Buyer', options: H.allBuyerOpts, get: (r) => H.style(r.styleId).buyerId }, { key: 'season', label: 'Season', options: H.seasonOpts, get: (r) => H.style(r.styleId).season }, { key: 'status', label: 'Status', options: ['DRAFT', 'APPROVED'] }],
       columns: [
-        { key: 'style', label: 'Style', value: (r) => H.style(r.styleId).styleRef, render: (r) => `<b>${esc(H.style(r.styleId).styleRef)}</b>${testTag(H.style(r.styleId))}<div class="small muted">${esc(H.buyer(H.style(r.styleId).buyerId).name)} · ${esc(H.style(r.styleId).season)}</div>` },
-        { key: 'desc', label: 'Description', hideSm: true, value: (r) => H.style(r.styleId).description || '', render: (r) => esc(H.style(r.styleId).description || '—') },
-        { key: 'fabric', label: 'Main fabric', hideSm: true, value: (r) => mainFabric(r), render: (r) => esc(mainFabric(r)) },
+        { key: 'style', label: 'Style', wrap: true, value: (r) => H.style(r.styleId).styleRef, render: (r) => `<b>${esc(H.style(r.styleId).styleRef)}</b>${testTag(H.style(r.styleId))}<div class="small muted">${esc(H.buyer(H.style(r.styleId).buyerId).name)} · ${esc(H.style(r.styleId).season)}</div>` },
+        { key: 'desc', label: 'Description', wrap: true, hideSm: true, value: (r) => H.style(r.styleId).description || '', render: (r) => esc(H.style(r.styleId).description || '—') },
+        { key: 'fabric', label: 'Main fabric', wrap: true, hideSm: true, value: (r) => mainFabric(r), render: (r) => esc(mainFabric(r)) },
         { key: 'label', label: 'Version', render: (r) => `${esc(r.label)} <span class="faint small">v${r.versionNo}</span>` },
         { key: 'status', label: 'Status', render: (r) => status(r.status) },
         { key: 'items', label: 'Items total', num: true, value: (r) => r.results.itemsTotal, render: (r) => Fmt.inr(r.results.itemsTotal) },
@@ -3385,8 +3434,8 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
             ${UI.field({ name: 'rateDate', label: 'Rate date', type: 'date', span: 's3', readonly: !editable }, st.rateDate)}
           </div></div></div>
           ${cats.map(section).join('')}
-          <div class="card"><div class="hd"><h2>Overall percentage</h2>${editable ? `<button class="btn sm" id="addPct" type="button">${ico('plus')}Add component</button>` : ''}</div><div class="bd p0"><div class="table-wrap"><table class="t"><thead><tr><th>Component</th><th>%</th><th>Basis</th><th class="num">Base</th><th class="num">Amount</th><th></th></tr></thead><tbody id="pctBody">
-            ${st.percentages.map((p) => `<tr><td><input class="cell" data-pi="${p.id}" data-f="name" value="${esc(p.name)}" ${editable ? '' : 'readonly'}></td><td style="width:90px"><input class="cell num" data-pi="${p.id}" data-f="pct" value="${esc(p.pct)}" inputmode="decimal" ${editable ? '' : 'readonly'}></td><td style="width:200px"><select class="cell" data-pi="${p.id}" data-f="basis" ${editable ? '' : 'disabled'}><option value="ITEMS"${p.basis === 'ITEMS' ? ' selected' : ''}>% of items total</option><option value="CUMULATIVE"${p.basis === 'CUMULATIVE' ? ' selected' : ''}>% of running total</option></select></td><td class="num" data-pbase="${p.id}"></td><td class="num"><b data-pamt="${p.id}"></b></td><td>${editable ? `<button class="btn xs danger" data-pdel="${p.id}" type="button" aria-label="Remove">${ico('trash')}</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="6" class="empty small">No percentage components</td></tr>'}
+          <div class="card"><div class="hd"><h2>Overall percentage</h2>${editable ? `<button class="btn sm" id="addPct" type="button">${ico('plus')}Add component</button>` : ''}</div><div class="bd p0"><div class="table-wrap"><table class="t"><thead><tr><th>Component</th><th>%</th><th>Basis</th><th title="Rejection — added to expense limits">Rej</th><th class="num">Base</th><th class="num">Amount</th><th></th></tr></thead><tbody id="pctBody">
+            ${st.percentages.map((p) => `<tr><td><input class="cell" data-pi="${p.id}" data-f="name" value="${esc(p.name)}" ${editable ? '' : 'readonly'}></td><td style="width:90px"><input class="cell num" data-pi="${p.id}" data-f="pct" value="${esc(p.pct)}" inputmode="decimal" ${editable ? '' : 'readonly'}></td><td style="width:200px"><select class="cell" data-pi="${p.id}" data-f="basis" ${editable ? '' : 'disabled'}><option value="ITEMS"${p.basis === 'ITEMS' ? ' selected' : ''}>% of items total</option><option value="CUMULATIVE"${p.basis === 'CUMULATIVE' ? ' selected' : ''}>% of running total</option></select></td><td style="width:48px;text-align:center"><input type="checkbox" data-pi="${p.id}" data-f="rej" ${Calc.isRejection(p) ? 'checked' : ''} ${editable ? '' : 'disabled'} title="Rejection % — added to expense limits" aria-label="Rejection"></td><td class="num" data-pbase="${p.id}"></td><td class="num"><b data-pamt="${p.id}"></b></td><td>${editable ? `<button class="btn xs danger" data-pdel="${p.id}" type="button" aria-label="Remove">${ico('trash')}</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="7" class="empty small">No percentage components</td></tr>'}
           </tbody></table></div><div class="bd small muted">Workbook method: one combined “REJ + OH + COMM + MARGIN” % applied to the items total. Split into separate components only when the client confirms each component's base.</div></div></div>
           <div class="card"><div class="hd"><h2>Notes</h2></div><div class="bd"><textarea class="inp" id="cNotes" style="width:100%;min-height:60px" ${editable ? '' : 'readonly'}>${esc(st.notes)}</textarea></div></div>
         </div>
@@ -3416,7 +3465,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
         i.addEventListener('input', h); i.addEventListener('change', h);
       });
       view.querySelectorAll('[data-pi]').forEach((i) => {
-        const h = () => { const p = st.percentages.find((x) => x.id === i.dataset.pi); p[i.dataset.f] = i.value; setDirty(true); calc(); };
+        const h = () => { const p = st.percentages.find((x) => x.id === i.dataset.pi); p[i.dataset.f] = i.type === 'checkbox' ? i.checked : i.value; setDirty(true); calc(); };
         i.addEventListener('input', h); i.addEventListener('change', h);
       });
       view.querySelectorAll('[data-pdel]').forEach((b) => (b.onclick = () => { st.percentages = st.percentages.filter((p) => p.id !== b.dataset.pdel); setDirty(true); draw(); }));
@@ -4311,6 +4360,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
         <dt>Confirmed price</dt><dd>${Fmt.money(s.unitPrice, s.currency)}</dd><dt>Exchange rate</dt><dd>₹${Fmt.num(s.exchangeRate, 4)} per ${esc(s.currency)} — dated ${fmtDate(s.rateDate)} (${s.rateSource === 'TABLE' ? 'from rate table' : 'entered manually'})</dd>
         <dt>Foreign value</dt><dd>${Fmt.money(s.foreignValue, s.currency)} = ${s.shippedQty} × ${Fmt.num(s.unitPrice, 4)}</dd><dt>INR value</dt><dd><b>${Fmt.inr(s.inrValue)}</b> = ${Fmt.num(s.foreignValue)} × ${Fmt.num(s.exchangeRate, 4)}</dd>
         <dt>Final shipment</dt><dd>${s.isFinal ? `Yes — difference ${s.diffQty > 0 ? '+' : ''}${s.diffQty} pcs` : 'No (partial)'}</dd><dt>Reason</dt><dd>${esc(s.differenceReason || '—')}</dd>${s.excessAccepted ? `<dt>Excess accepted</dt><dd>${esc(s.excessRef)}</dd>` : ''}
+        ${(s.additions || []).length || (s.deductions || []).length ? `<dt>Additions</dt><dd>${(s.additions || []).map((x) => `${esc(x.desc)} — <b>${Fmt.inr(x.amount)}</b>`).join('<br>') || '—'}</dd><dt>Deductions</dt><dd>${(s.deductions || []).map((x) => `${esc(x.desc)} — <b>${Fmt.inr(x.amount)}</b>`).join('<br>') || '—'}</dd><dt>Net INR</dt><dd><b>${Fmt.inr(s.netInr || s.inrValue)}</b> = INR value + additions − deductions</dd>` : ''}
         <dt>Invoice</dt><dd>${esc(s.invoiceRef || '—')}</dd><dt>Remarks</dt><dd>${esc(s.remarks || '—')}</dd><dt>Recorded</dt><dd>${esc(s.createdBy)} · ${fmtDT(s.createdAt)}</dd></dl>`,
       actions: [{ label: 'Close' }],
     });
@@ -4333,15 +4383,46 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
         ${UI.field({ name: 'fv', label: 'Foreign value', type: 'static', span: 's3', html: '<b id="shF">—</b>' })}
         ${UI.field({ name: 'iv', label: 'INR value', type: 'static', span: 's3', html: '<b id="shI">—</b>' })}
         ${UI.field({ name: 'dv', label: 'Order vs shipped', type: 'static', span: 's3', html: '<b id="shD">—</b>' })}
+        <div class="fld s12"><label>Bill additions &amp; deductions <span class="faint" style="font-weight:400">— Net INR = INR value + additions − deductions</span></label>
+          <div class="shadj">
+            <div class="shadj-col"><div class="shadj-hd"><button class="btn primary sm" type="button" id="shAddA">₹ Addition</button><span class="small">Total <b id="shAT">₹0.00</b></span></div><div id="shAL"></div></div>
+            <div class="shadj-col"><div class="shadj-hd"><button class="btn primary sm" type="button" id="shAddD">₹ Deduction</button><span class="small">Total <b id="shDT">₹0.00</b></span></div><div id="shDL"></div></div>
+          </div>
+          <div class="shadj-net"><span>INR value <b id="shNI">—</b></span><span>+ Additions <b id="shNA">₹0.00</b></span><span>− Deductions <b id="shND">₹0.00</b></span><span class="tot">Net INR <b id="shNN">—</b></span></div>
+        </div>
         ${UI.field({ name: 'isFinal', label: 'Final shipment for this order line (completes it)', type: 'checkbox', span: 's6' }, v0.isFinal)}
         ${UI.field({ name: 'invoiceRef', label: 'Invoice reference', span: 's6', help: 'Used to prevent double counting' }, v0.invoiceRef)}
         ${UI.field({ name: 'differenceReason', label: 'Difference reason', type: 'textarea', span: 's6', help: 'Required when the final shipped total differs from the order' }, v0.differenceReason)}
         ${UI.field({ name: 'remarks', label: 'Remarks', type: 'textarea', span: 's6' }, v0.remarks)}
         <div class="fld s12 hidden" id="excessBox"><div class="notice warn" style="margin:0 0 8px">Shipped total exceeds the allowed excess (${esc(db.settings.shipment.maxExcessPct)}%). Commercial acceptance by the buyer is required.</div><div class="form-grid">${UI.field({ name: 'excessAccepted', label: 'Excess commercially accepted', type: 'checkbox', span: 's6' }, v0.excessAccepted)}${UI.field({ name: 'excessRef', label: 'Acceptance reference', span: 's6' }, v0.excessRef)}</div></div>
       </div>`,
-      actions: [{ label: 'Cancel' }, { label: 'Save shipment', cls: 'primary', onClick: async (mm) => { const v = read(mm.el); ['fv', 'iv', 'dv'].forEach((k) => delete v[k]); if (s) v.lineId = s.lineId; const x = await svc.saveShipment(Object.assign(v, { id: s && s.id })); toast(`${x.shipNo} saved`, 'ok'); } }],
+      actions: [{ label: 'Cancel' }, { label: 'Save shipment', cls: 'primary', onClick: async (mm) => { const v = read(mm.el); ['fv', 'iv', 'dv'].forEach((k) => delete v[k]); if (s) v.lineId = s.lineId; const x = await svc.saveShipment(Object.assign(v, { id: s && s.id, additions: adj.A, deductions: adj.D })); toast(`${x.shipNo} saved`, 'ok'); } }],
     });
     const el = m.el; const S = (n) => $(`[name=${n}]`, el);
+    // ---- bill additions / deductions (editable rows; amount also accepts "691 x 134.5") ----
+    const adj = { A: (v0.additions || []).map((x) => Object.assign({}, x)), D: (v0.deductions || []).map((x) => Object.assign({}, x)) };
+    let curInr = null;
+    const evalAmt = (t) => { const q = String(t || '').trim(); if (/^[\d.\s]+([x×*][\d.\s]+)+$/i.test(q)) { try { return q.split(/[x×*]/i).reduce((acc, n) => acc.mul(D(n.trim())), D(1)).toFixed(2); } catch (e) { return q; } } return q; };
+    const tot = (k) => sum(adj[k].filter((x) => SP.Dec.valid(x.amount || '')), (x) => D(x.amount));
+    const updAdj = () => {
+      const a = tot('A'), d = tot('D');
+      $('#shAT', el).textContent = Fmt.inr(a.toString()); $('#shDT', el).textContent = Fmt.inr(d.toString());
+      $('#shNA', el).textContent = Fmt.inr(a.toString()); $('#shND', el).textContent = Fmt.inr(d.toString());
+      $('#shNI', el).textContent = curInr === null ? '—' : Fmt.inr(curInr);
+      $('#shNN', el).textContent = curInr === null ? '—' : Fmt.inr(Calc.adjustedInr(curInr, a, d).toString());
+    };
+    const drawAdj = (k) => {
+      const box = $(k === 'A' ? '#shAL' : '#shDL', el);
+      box.innerHTML = adj[k].length ? adj[k].map((x, i) => `<div class="adjrow"><input class="inp" data-k="${k}" data-i="${i}" data-f="desc" value="${esc(x.desc || '')}" placeholder="${k === 'A' ? 'e.g. Cut to check: 691 × 134.5' : 'e.g. Discount / debit note'}" aria-label="Description"><input class="inp num" data-k="${k}" data-i="${i}" data-f="amount" value="${esc(x.amount || '')}" inputmode="decimal" placeholder="0.00" aria-label="Amount"><button class="btn xs danger" type="button" data-rmk="${k}" data-rmi="${i}" aria-label="Remove">${ico('trash')}</button></div>`).join('') : `<div class="small faint" style="padding:4px 2px">No ${k === 'A' ? 'addition' : 'deduction'} added.</div>`;
+      $$('input[data-k]', box).forEach((inp) => {
+        inp.oninput = () => { adj[inp.dataset.k][+inp.dataset.i][inp.dataset.f] = inp.value; updAdj(); };
+        if (inp.dataset.f === 'amount') inp.onblur = () => { const v = evalAmt(inp.value); if (v !== inp.value) { inp.value = v; adj[inp.dataset.k][+inp.dataset.i].amount = v; updAdj(); } };
+      });
+      $$('[data-rmk]', box).forEach((b) => (b.onclick = () => { adj[b.dataset.rmk].splice(+b.dataset.rmi, 1); drawAdj(b.dataset.rmk); updAdj(); }));
+    };
+    $('#shAddA', el).onclick = () => { adj.A.push({ desc: '', amount: '' }); drawAdj('A'); const ins = $$('#shAL input[data-f=desc]', el); ins[ins.length - 1].focus(); };
+    $('#shAddD', el).onclick = () => { adj.D.push({ desc: '', amount: '' }); drawAdj('D'); const ins = $$('#shDL input[data-f=desc]', el); ins[ins.length - 1].focus(); };
+    drawAdj('A'); drawAdj('D');
     const line = () => byId(Store.db, 'lines', s ? s.lineId : S('lineId').value);
     const fillLine = (first) => {
       const l = line();
@@ -4360,8 +4441,9 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
       const qty = Number(S('shippedQty').value || 0);
       const cum = prev + (Number.isInteger(qty) ? qty : 0);
       $('#lineInfo', el).innerHTML = `Order <b>${Fmt.qty(l.orderQty)}</b> pcs · confirmed price <b>${Fmt.money(l.confirmedPrice, l.currency)}</b> · already shipped ${Fmt.qty(prev)} · remaining ${Fmt.qty(Math.max(0, l.orderQty - prev))} · pooled in ${Store.db.allocations.filter((a) => a.lineId === l.id && a.status === 'ACTIVE').map((a) => (H.pool(a.poolId) || {}).poolNo).join(', ') || 'none'}`;
-      try { const v = Calc.shipmentValues(qty || 0, l.confirmedPrice, S('exchangeRate').value || '0'); $('#shF', el).textContent = Fmt.money(v.foreign, l.currency); $('#shI', el).textContent = Fmt.inr(v.inr); }
-      catch (e) { $('#shF', el).textContent = Fmt.money(D(qty || 0).mul(l.confirmedPrice).round(2).toString(), l.currency); $('#shI', el).textContent = 'enter rate'; }
+      try { const v = Calc.shipmentValues(qty || 0, l.confirmedPrice, S('exchangeRate').value || '0'); $('#shF', el).textContent = Fmt.money(v.foreign, l.currency); $('#shI', el).textContent = Fmt.inr(v.inr); curInr = v.inr; }
+      catch (e) { $('#shF', el).textContent = Fmt.money(D(qty || 0).mul(l.confirmedPrice).round(2).toString(), l.currency); $('#shI', el).textContent = 'enter rate'; curInr = null; }
+      updAdj();
       const final = S('isFinal').checked || cum >= l.orderQty;
       const d = cum - l.orderQty;
       $('#shD', el).innerHTML = final ? (d === 0 ? 'Matches order' : `<span class="${d < 0 ? 'neg' : 'pos'}">${d < 0 ? 'Shortage' : 'Excess'} ${Math.abs(d)} pcs</span>`) : `Partial — ${Fmt.qty(Math.max(0, l.orderQty - cum))} pcs pending`;
@@ -4406,7 +4488,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     table($('#adj', view), {
       id: 'adj-' + p.id, noToolbar: true, noPaging: true, rows: r.adjustments.list, empty: 'No additions or deductions',
       columns: [{ key: 'adjNo', label: 'ID', render: (x) => `<span class="mono">${esc(x.adjNo)}</span>${testTag(x)}` }, { key: 'type', label: 'Type', render: (x) => badge(x.type === 'ADDITION' ? 'Addition' : 'Deduction', x.type === 'ADDITION' ? 'ok' : 'bad') }, { key: 'date', label: 'Date', render: (x) => fmtDate(x.date) }, { key: 'amount', label: 'Amount', num: true, render: (x) => `${x.type === 'DEDUCTION' ? '−' : '+'}${Fmt.inr(x.amount)}` }, { key: 'reason', label: 'Reason', wrap: true }, { key: 'reference', label: 'Reference' }, { key: 'createdBy', label: 'By' }],
-      footer: () => `<td colspan="3">Net adjustment</td><td class="num">${Fmt.inr(D(r.totals.additions).sub(r.totals.deductions).toString())}</td><td colspan="3"></td>`,
+      footer: () => `<td colspan="3">Net adjustment (pool)</td><td class="num">${Fmt.inr(D(r.adjustments.additions).sub(r.adjustments.deductions).toString())}</td><td colspan="3"></td>`,
       actions: () => (open ? guard('adjustments.edit', act('edit', '', '', 'edit', false, 'Edit') + act('del', '', 'danger', 'trash', false, 'Delete')) : ''),
       on: {
         edit: (x) => editAdj(p, x.type, x),
@@ -4444,7 +4526,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
   /* ======================= EXPENSE LIMITS ======================= */
   App.route('limits', ['reports.view', 'expenses.view'], async (view, q) => {
     const p = q.pool ? byId(Store.db, 'pools', q.pool) : null;
-    view.innerHTML = pageHead('Expense Limit', 'Expense limit = applicable order qty × costing cost per piece × (1 + costing variance %). Difference = limit − actual (positive = under the limit).') + H.poolBar(view, q, 'limits', (x) => x.status !== 'CANCELLED');
+    view.innerHTML = pageHead('Expense Limit', 'Expense limit = applicable order qty × costing cost per piece (incl. allowance %) × (1 + Rej %) × (1 + costing variance %). Difference = limit − actual (positive = under the limit).') + H.poolBar(view, q, 'limits', (x) => x.status !== 'CANCELLED');
     H.bindPoolBar(view, 'limits');
     if (!p) { view.insertAdjacentHTML('beforeend', '<div class="card">' + empty('Select a pool') + '</div>'); return; }
     const r = SP.computePool(Store.db, p.id); const v = r.variance;
@@ -4478,7 +4560,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     const vp = (sid) => (r.limits.find((l) => l.styleId === sid && l.category === cat) || {}).variancePct;
     modal({
       title: `${H.catLabel(cat)}${styleId ? ' — ' + H.style(styleId).styleRef : ''} — ${p.poolNo}`, size: 'xl',
-      body: `<h3 style="margin:0 0 6px">Limit build-up (from costing × allocated qty)</h3><div class="table-wrap"><table class="t"><thead><tr><th>Order</th><th>Style</th><th>Costing</th><th class="num">Allocated qty</th><th class="num">Cost / pc</th><th class="num">Qty × cost</th><th class="num">Variance %</th></tr></thead><tbody>${allocs.map((a) => { const l = byId(db, 'lines', a.lineId); const c = byId(db, 'costings', l.costingId); const cpp = c ? c.results.categories[cat] || '0' : '0'; return `<tr><td>${esc(a.confNo)} ${esc(a.poNumber)} ${esc(a.combo)}</td><td>${esc(a.styleRef)}</td><td>${esc(c ? c.label : '—')}</td><td class="num">${a.qty}</td><td class="num">${Fmt.inr(cpp)}</td><td class="num">${Fmt.inr(D(a.qty).mul(cpp).toString())}</td><td class="num">${vp(a.styleId) ? Fmt.pct(vp(a.styleId)) : '—'}</td></tr>`; }).join('')}</tbody></table></div>
+      body: `<h3 style="margin:0 0 6px">Limit build-up — costing input (incl. allow %) + Rej % + variance %</h3><div class="table-wrap"><table class="t"><thead><tr><th>Order</th><th>Style</th><th>Costing</th><th class="num">Allocated qty</th><th class="num">Costing cost / pc<div class="small faint">incl. allow %</div></th><th class="num">Rej %</th><th class="num">Limit cost / pc<div class="small faint">+ Rej %</div></th><th class="num">Variance %</th><th class="num">Limit<div class="small faint">qty × cost × (1 + var %)</div></th></tr></thead><tbody>${allocs.map((a) => { const l = byId(db, 'lines', a.lineId); const c = byId(db, 'costings', l.costingId); const cpp = c ? c.results.categories[cat] || '0' : '0'; const rp = c ? Calc.rejectionPct(c) : D(0); const inc = Calc.limitCostPerPiece(cpp, rp); const v = vp(a.styleId) || '0'; const lim = D(a.qty).mul(inc).mul(D(1).add(D(v).div(100))); return `<tr><td>${esc(a.confNo)} ${esc(a.poNumber)} ${esc(a.combo)}</td><td>${esc(a.styleRef)}</td><td>${esc(c ? c.label : '—')}</td><td class="num">${a.qty}</td><td class="num">${Fmt.inr(cpp)}</td><td class="num">${Fmt.pct(rp.toString())}</td><td class="num"><b>${Fmt.inr(inc.round(2).toString())}</b></td><td class="num">${vp(a.styleId) ? Fmt.pct(vp(a.styleId)) : '—'}</td><td class="num">${Fmt.inr(lim.round(2).toString())}</td></tr>`; }).join('')}</tbody><tfoot><tr><td colspan="8">Expense limit</td><td class="num">${Fmt.inr(sum(r.limits.filter((x) => x.category === cat && x.styleId && (styleId === null || x.styleId === styleId)), (x) => D(x.limit)).toString())}</td></tr></tfoot></table></div>
         <h3 style="margin:14px 0 6px">Actual expense entries</h3><div class="table-wrap"><table class="t"><thead><tr><th>Entry</th><th>Style</th><th>Item</th><th class="num">Qty</th><th class="num">Rate</th><th class="num">Amount</th><th>Status</th></tr></thead><tbody>${exps.map((e) => `<tr><td>${esc(e.expNo)}</td><td>${esc(e.styleId ? H.style(e.styleId).styleRef : 'Shared')}</td><td>${esc(e.itemName)}</td><td class="num">${Fmt.num(e.qty, 3)} ${esc(e.unit || '')}</td><td class="num">${Fmt.num(e.rate)}</td><td class="num">${Fmt.inr(e.amount)}</td><td>${status(e.status)}</td></tr>`).join('') || '<tr><td colspan="7" class="empty small">No entries</td></tr>'}</tbody><tfoot><tr><td colspan="5">Total saved</td><td class="num">${Fmt.inr(sum(exps.filter((e) => e.status === 'SAVED'), (e) => D(e.amount)).toString())}</td><td></td></tr></tfoot></table></div>
         <p style="margin-top:12px"><a class="btn sm" href="#/expenses?pool=${p.id}&cat=${cat}">Open in expense workspace</a></p>`,
       actions: [{ label: 'Close' }],
@@ -4595,6 +4677,92 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
       <h2>Margins</h2><table><tbody><tr><td>Budget-based margin (INR received − expense limits ${Fmt.inr(r.totals.totalLimits)}) — estimate</td><td class="num">${Fmt.inr(r.margins.budgetMargin)} (${Fmt.pct(r.margins.budgetMarginPct)})</td></tr><tr><td>Actual expense-based margin (INR received − actual expenses ${Fmt.inr(r.totals.totalActual)}) — result</td><td class="num"><b>${Fmt.inr(r.margins.actualMargin)}</b> (${Fmt.pct(r.margins.actualMarginPct)})</td></tr></tbody></table>
       <h2>Category-wise expense variance</h2><table><thead><tr><th>Category</th><th class="num">Limit</th><th class="num">Actual</th><th class="num">Limit − actual</th><th class="num">%</th></tr></thead><tbody>${r.byCat.map((c) => `<tr><td>${esc(c.label)}</td><td class="num">${Fmt.num(c.limit)}</td><td class="num">${Fmt.num(c.actual)}</td><td class="num">${Fmt.num(c.diff)}</td><td class="num">${c.diffPct === null ? '—' : Fmt.pct(c.diffPct)}</td></tr>`).join('')}</tbody><tfoot><tr><td>Total</td><td class="num">${Fmt.num(r.totals.totalLimits)}</td><td class="num">${Fmt.num(r.totals.totalActual)}</td><td class="num">${Fmt.num(r.totals.expenseDiff)}</td><td class="num">${r.totals.expenseDiffPct === null ? '—' : Fmt.pct(r.totals.expenseDiffPct)}</td></tr></tfoot></table>
       <p class="muted">Costing variance applied: ${r.variance.override ? Fmt.pct(r.variance.override.pct) + ' (approved override: ' + esc(r.variance.override.reason) + ')' : Fmt.pct(r.variance.computedPoolPct)}. Missing/additional items: ${r.exceptions.total} (${r.exceptions.pending} pending). Formula ${esc(Calc.FORMULA_VERSION)}.</p>`;
+  }
+
+  /* ======================= ADDITION & DEDUCTION ======================= */
+  App.route('adjustments', 'shipments.view', async (view, q) => {
+    const db = Store.db;
+    const p = q.pool ? byId(db, 'pools', q.pool) : null;
+    view.innerHTML = pageHead('Addition & Deduction', 'Additions: surplus / excess amounts received other than shipments (e.g. surplus pcs sold, excess fabric) — added to INR received. Deductions: discounts / debits — deducted from INR received.') + H.poolBar(view, q, 'adjustments', (x) => x.status !== 'CANCELLED');
+    H.bindPoolBar(view, 'adjustments');
+    if (!p) { view.insertAdjacentHTML('beforeend', '<div class="card">' + empty('Select a pool', '<p>Search above by pool number, buyer or style.</p>') + '</div>'); return; }
+    const r = SP.computePool(db, p.id);
+    const open = ['ACTIVE', 'REOPENED'].includes(p.status) && can('adjustments.edit');
+    const adds = r.adjustments.list.filter((x) => x.type === 'ADDITION');
+    const deds = r.adjustments.list.filter((x) => x.type === 'DEDUCTION');
+    const tA = sum(adds, (x) => D(x.amount)).toString(), tD = sum(deds, (x) => D(x.amount)).toString();
+    const belongs = (x) => (x.styleId ? H.style(x.styleId).styleRef : 'For all');
+    view.insertAdjacentHTML('beforeend', `
+      ${!open ? `<div class="notice ${p.status === 'CLOSED' ? 'ok' : 'warn'}">${p.status === 'CLOSED' ? 'Pool is closed — read-only.' : p.status === 'DRAFT' ? 'Pool is a draft — activate it first.' : 'Read-only: you do not have permission to add additions / deductions.'}</div>` : ''}
+      <div class="kpis"><div class="kpi"><div class="l">INR shipment value</div><div class="v">${Fmt.inr(r.totals.shipmentInr)}</div></div><div class="kpi ok"><div class="l">+ Additions</div><div class="v">${Fmt.inr(r.totals.additions)}</div><div class="s">items ${Fmt.inr(r.adjustments.additions, 0)} · shipment bills ${Fmt.inr(r.adjustments.shipAdditions, 0)}</div></div><div class="kpi bad"><div class="l">− Deductions</div><div class="v">${Fmt.inr(r.totals.deductions)}</div><div class="s">pool ${Fmt.inr(r.adjustments.deductions, 0)} · shipment bills ${Fmt.inr(r.adjustments.shipDeductions, 0)}</div></div><div class="kpi"><div class="l">INR received</div><div class="v">${Fmt.inr(r.totals.inrReceived)}</div><div class="s">shipments + additions − deductions</div></div></div>
+      <div class="card"><div class="hd"><h2>Additional items</h2><span class="sec-total">${Fmt.inr(tA)}</span>${open ? btn('Add addition', 'id="aAdd"', 'primary sm', 'plus') : ''}</div><div class="bd p0" id="aT"></div></div>
+      <div class="card"><div class="hd"><h2>Deductions</h2><span class="sec-total">${Fmt.inr(tD)}</span>${open ? btn('Add deduction', 'id="aDed"', 'sm', 'plus') : ''}</div><div class="bd p0" id="dT"></div></div>`);
+    const acts = () => (open ? act('edit', 'Edit') + act('del', '', 'danger', 'trash', false, 'Delete') : '');
+    const del = async (x) => { const why = await ask(`Delete ${x.adjNo}`, 'Reason', { danger: true, ok: 'Delete' }); if (why) run(null, async () => { await svc.deleteAdjustment(x.id, why); toast('Deleted', 'ok'); }); };
+    table($('#aT', view), {
+      id: 'adda-' + p.id, exportName: `${p.poolNo}-additions`, noPaging: true, rows: () => adds, empty: 'No additional items',
+      columns: [
+        { key: 'itemName', label: 'Item / details', wrap: true, value: (x) => x.itemName || x.reason, render: (x) => `<b>${esc(x.itemName || x.reason)}</b>${x.details ? `<div class="small muted">${esc(x.details)}</div>` : ''}` },
+        { key: 'disposition', label: 'Stock / Disposed', value: (x) => (x.disposition === 'STOCK' ? 'Stock' : x.disposition === 'DISPOSED' ? 'Disposed' : '') },
+        { key: 'qty', label: 'Qty / unit', num: true, value: (x) => x.qty || '', render: (x) => (x.qty === null || x.qty === undefined ? '—' : `${Fmt.num(x.qty, 3).replace(/\.?0+$/, '')} ${esc(x.unit || '')}`) },
+        { key: 'rate', label: 'Rate', num: true, value: (x) => x.rate || '', render: (x) => (x.rate === null || x.rate === undefined ? '—' : Fmt.num(x.rate)) },
+        { key: 'amount', label: 'Amount', num: true, render: (x) => `<b>${Fmt.inr(x.amount)}</b>` },
+        { key: 'belongs', label: 'Belongs to (order / style)', value: belongs },
+        { key: 'date', label: 'Date', render: (x) => fmtDate(x.date) },
+      ],
+      footer: () => `<td colspan="4">Total</td><td class="num"><b>${Fmt.inr(tA)}</b></td><td colspan="3"></td>`,
+      actions: acts, on: { edit: (x) => editAdj(p, r, 'ADDITION', x), del },
+    });
+    table($('#dT', view), {
+      id: 'addd-' + p.id, exportName: `${p.poolNo}-deductions`, noPaging: true, rows: () => deds, empty: 'No deductions',
+      columns: [
+        { key: 'reason', label: 'Deduction reason', wrap: true, render: (x) => `<b>${esc(x.reason)}</b>` },
+        { key: 'details', label: 'Details', wrap: true, value: (x) => x.details || '' },
+        { key: 'amount', label: 'Amount', num: true, render: (x) => `<b>${Fmt.inr(x.amount)}</b>` },
+        { key: 'belongs', label: 'Belongs to (order / style)', value: belongs },
+        { key: 'date', label: 'Date', render: (x) => fmtDate(x.date) },
+      ],
+      footer: () => `<td colspan="2">Total</td><td class="num"><b>${Fmt.inr(tD)}</b></td><td colspan="3"></td>`,
+      actions: acts, on: { edit: (x) => editAdj(p, r, 'DEDUCTION', x), del },
+    });
+    const ba = $('#aAdd', view); if (ba) ba.onclick = () => editAdj(p, r, 'ADDITION');
+    const bd = $('#aDed', view); if (bd) bd.onclick = () => editAdj(p, r, 'DEDUCTION');
+  });
+  function editAdj(p, r, type, x) {
+    const isA = type === 'ADDITION';
+    const styleOpts = [{ value: '', label: 'For all (whole pool)' }].concat(r.styles.map((s) => ({ value: s.styleId, label: `${s.styleRef} — ${s.description || ''}` })));
+    const v0 = x ? Object.assign({}, x) : { date: SP.today(), unit: 'pc', disposition: 'DISPOSED' };
+    modal({
+      title: `${x ? 'Edit' : 'Add'} ${isA ? 'addition' : 'deduction'} — ${p.poolNo}`, size: 'lg',
+      body: form(isA ? [
+        { name: 'itemName', label: 'Item / details', required: true, span: 's8', placeholder: 'e.g. Surplus pcs / Yellow jersey fabric excess' },
+        { name: 'disposition', label: 'Stock / Disposed', type: 'select', options: [{ value: 'STOCK', label: 'Stock' }, { value: 'DISPOSED', label: 'Disposed' }], placeholder: false, span: 's4' },
+        { name: 'qty', label: 'Quantity', type: 'decimal', span: 's3' },
+        { name: 'unit', label: 'Unit', type: 'select', options: Store.db.settings.units, span: 's3' },
+        { name: 'rate', label: 'Rate (₹)', type: 'decimal', span: 's3' },
+        { name: 'amount', label: 'Amount (₹)', type: 'decimal', span: 's3', help: 'Auto = qty × rate; enter directly if no qty / rate' },
+        { name: 'styleId', label: 'Belongs to order / style', type: 'select', options: styleOpts, placeholder: false, span: 's6' },
+        { name: 'date', label: 'Date', type: 'date', required: true, span: 's6' },
+        { name: 'details', label: 'Remarks', type: 'textarea', span: 's12' },
+      ] : [
+        { name: 'reason', label: 'Deduction reason', required: true, span: 's6', placeholder: 'e.g. Discount / debit note' },
+        { name: 'amount', label: 'Amount (₹)', type: 'decimal', required: true, span: 's6' },
+        { name: 'details', label: 'Details', type: 'textarea', span: 's12' },
+        { name: 'styleId', label: 'Belongs to order / style', type: 'select', options: styleOpts, placeholder: false, span: 's6' },
+        { name: 'date', label: 'Date', type: 'date', required: true, span: 's6' },
+      ], Object.assign({}, v0, { styleId: v0.styleId || '' })),
+      onMount: (m) => {
+        if (!isA) return;
+        const Q = (n) => $(`[name=${n}]`, m.el);
+        const upd = () => { const q = Q('qty').value.trim(), rt = Q('rate').value.trim(); if (q && rt && SP.Dec.valid(q) && SP.Dec.valid(rt)) Q('amount').value = D(q).mul(rt).round(2).toString(); };
+        Q('qty').addEventListener('input', upd); Q('rate').addEventListener('input', upd);
+      },
+      actions: [{ label: 'Cancel' }, { label: 'Save', cls: 'primary', onClick: async (m) => {
+        const v = read(m.el);
+        const data = Object.assign({ id: x && x.id, poolId: p.id, type, styleId: v.styleId || '', date: v.date, details: v.details }, isA ? { itemName: v.itemName, disposition: v.disposition, qty: v.qty, unit: v.unit, rate: v.rate, amount: v.amount } : { reason: v.reason, amount: v.amount });
+        await svc.saveAdjustment(data); toast(`${isA ? 'Addition' : 'Deduction'} saved`, 'ok');
+      } }],
+    });
   }
 
   /* ======================= POOL CLOSURE ======================= */
@@ -4786,7 +4954,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
         card('Fabric rate build-up — default template', `${s.fabricBuild.confirmed ? '' : '<div class="notice warn"><b>Pending confirmation.</b> The reference costing sheet lists Yarn 300 + Knitting 12 + Dyeing 100 + Stendering 20 + Compacting 10 = ₹442.00, and 10% loss = ₹44.20, but it prints the fabric base cost as ₹486.40. The arithmetic gives ₹486.20, which is what the app calculates (base cost = total + total × loss %). Tick the box below once the client confirms this.</div>'}<p class="small muted" style="margin-top:0">These rows and the loss % are copied into a fabric row when the user chooses “Build rate from materials &amp; processes”, and can be edited there. Existing costings are not changed.</p>` + form([{ name: 'fbLossPct', label: 'Default build-up loss %', type: 'decimal', span: 's4', help: 'Process loss on the build-up total (separate from the fabric row consumption loss)' }, { name: 'fbConfirmed', label: 'Formula confirmed by the client (base cost = total + loss)', type: 'checkbox', span: 's12' }], { fbLossPct: s.fabricBuild.lossPct, fbConfirmed: s.fabricBuild.confirmed }) + `<div class="table-wrap" style="margin-top:12px"><div id="fbList"></div></div><button class="btn sm" type="button" id="fbAddT">${ico('plus')}Add material / process</button><div class="small muted" id="fbPrev" style="margin-top:8px"></div>`, 'sFB') +
         card('Master lists', form([{ name: 'units', label: 'Units (comma separated)', span: 's12', help: 'Consumption and rate units must match on a costing row; incompatible units are rejected.' }, { name: 'productTypes', label: 'Product types', span: 's12' }, { name: 'extraCategories', label: 'Additional expense categories', span: 's12', help: 'Added after Fabric, Application, Others, CMT, Trims, Labelling, Packing accessories, Packaging, Forwarding, Bank charges' }, { name: 'sizeSets', label: 'Size sets (one per line: Name: size1, size2, …)', type: 'textarea', span: 's12', attrs: 'rows="5"' }], { units: s.units.join(', '), productTypes: s.productTypes.join(', '), extraCategories: s.extraCategories.join(', '), sizeSets: s.sizeSets.map((x) => `${x.name}: ${x.sizes.join(', ')}`).join('\n') }), 'sM');
       let pcts = SP.clone(s.defaultPercentages);
-      const drawP = () => { $('#pctList', sb).innerHTML = `<table class="t"><thead><tr><th>Name</th><th>%</th><th>Basis</th><th></th></tr></thead><tbody>${pcts.map((p, i) => `<tr><td><input class="cell" data-i="${i}" data-f="name" value="${esc(p.name)}"></td><td style="width:90px"><input class="cell num" data-i="${i}" data-f="pct" value="${esc(p.pct)}"></td><td><select class="cell" data-i="${i}" data-f="basis"><option value="ITEMS"${p.basis === 'ITEMS' ? ' selected' : ''}>% of items total</option><option value="CUMULATIVE"${p.basis === 'CUMULATIVE' ? ' selected' : ''}>% of running total</option></select></td><td><button class="btn xs danger" data-rm="${i}" type="button">${ico('trash')}</button></td></tr>`).join('')}</tbody></table>`; $$('[data-i]', sb).forEach((x) => (x.oninput = x.onchange = () => (pcts[+x.dataset.i][x.dataset.f] = x.value))); $$('[data-rm]', sb).forEach((b) => (b.onclick = () => { pcts.splice(+b.dataset.rm, 1); drawP(); })); };
+      const drawP = () => { $('#pctList', sb).innerHTML = `<table class="t"><thead><tr><th>Name</th><th>%</th><th>Basis</th><th title="Rejection — added to expense limits">Rej</th><th></th></tr></thead><tbody>${pcts.map((p, i) => `<tr><td><input class="cell" data-i="${i}" data-f="name" value="${esc(p.name)}"></td><td style="width:90px"><input class="cell num" data-i="${i}" data-f="pct" value="${esc(p.pct)}"></td><td><select class="cell" data-i="${i}" data-f="basis"><option value="ITEMS"${p.basis === 'ITEMS' ? ' selected' : ''}>% of items total</option><option value="CUMULATIVE"${p.basis === 'CUMULATIVE' ? ' selected' : ''}>% of running total</option></select></td><td style="text-align:center"><input type="checkbox" data-i="${i}" data-f="rej" ${SP.Calc.isRejection(p) ? 'checked' : ''} aria-label="Rejection"></td><td><button class="btn xs danger" data-rm="${i}" type="button">${ico('trash')}</button></td></tr>`).join('')}</tbody></table>`; $$('[data-i]', sb).forEach((x) => (x.oninput = x.onchange = () => (pcts[+x.dataset.i][x.dataset.f] = x.type === 'checkbox' ? x.checked : x.value))); $$('[data-rm]', sb).forEach((b) => (b.onclick = () => { pcts.splice(+b.dataset.rm, 1); drawP(); })); };
       drawP(); $('#pctAdd', sb).onclick = () => { pcts.push({ name: 'Component', pct: '0', basis: 'ITEMS' }); drawP(); };
       save('sC', (c) => ({ fabricLossPct: read(c).fabricLossPct, defaultPercentages: pcts }));
       let fbRows = SP.clone(s.fabricBuild.processes);
