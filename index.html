@@ -2249,6 +2249,73 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     add('verified', 'All costing items verified (ticked)', !pv.length, pv, `#/closure?pool=${p.id}`);
     return { checks: chk, ok: chk.every((c) => c.ok), report: r };
   }
+  /* ---------- Final pool report (Profitability → Pool detail) ----------
+     All figures come from the same pool engine, so the report always reconciles with the
+     Expense Limit, Shipment and Closure screens. */
+  const isMarginOH = (p) => !Calc.isRejection(p) && /margin|\boh\b|overhead/i.test(String(p.name || ''));
+  const normItem = (x) => String(x || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  function reportData(db, poolId) {
+    const r = computePool(db, poolId); if (!r) return null;
+    const closed = r.pool.status === 'CLOSED';
+    const allocs = db.allocations.filter((a) => a.poolId === poolId && a.status === 'ACTIVE').map((a) => { const line = byId(db, 'lines', a.lineId); return { a, line, style: byId(db, 'styles', line.styleId), costing: line.costingId ? byId(db, 'costings', line.costingId) : null }; });
+    // ---- margin variance (incl. OH) ----
+    // Estimated % = qty-weighted (Margin % + OH %) of the costings: Σ qty × (margin % + OH %) ÷ Σ qty
+    let wq = 0, wp = D(0);
+    allocs.forEach((x) => { if (!x.costing) return; wq += x.a.qty; wp = wp.add(D(x.a.qty).mul(sum(x.costing.percentages || [], (q) => (isMarginOH(q) ? D(q.pct || 0) : D(0))))); });
+    const L = D(r.totals.totalLimits), A = D(r.totals.totalActual);
+    const est = wq ? wp.div(wq).round(2) : D(0);
+    // Actual % = (total expense limit × (1 + estimated %) − actual expense) ÷ total expense limit
+    const act = L.isZero() ? null : L.mul(D(1).add(est.div(100))).sub(A).div(L).mul(100).round(2);
+    const marginVariance = { estimatedPct: est.toString(), actualPct: act === null ? null : act.toString(), diffPct: act === null ? null : act.sub(est).round(2).toString(), amount: L.sub(A).round(2).toString() };
+    // ---- orders (by style, confirmed rate and costing) ----
+    const orders = [], okey = new Map(), orderVal = {};
+    allocs.forEach((x) => {
+      const k = `${x.style.id}|${x.a.price}|${x.a.currency}|${x.costing ? x.costing.id : ''}`;
+      if (!okey.has(k)) { const o = { styleId: x.style.id, styleRef: x.style.styleRef, qty: 0, price: x.a.price, currency: x.a.currency, value: D(0), exchangeRate: x.costing ? x.costing.exchangeRate : null, rateDate: x.costing ? x.costing.rateDate : null }; okey.set(k, o); orders.push(o); }
+      const o = okey.get(k); o.qty += x.a.qty; o.value = o.value.add(D(x.a.qty).mul(x.a.price));
+      orderVal[x.a.currency] = D(orderVal[x.a.currency] || 0).add(D(x.a.qty).mul(x.a.price));
+    });
+    // ---- shipments (by style) ----
+    const shipStyles = new Map(), shipVal = {};
+    r.styles.forEach((st) => shipStyles.set(st.styleId, { styleId: st.styleId, styleRef: st.styleRef, qty: 0, value: D(0), currency: null, inr: D(0), rates: [] }));
+    r.shipments.list.forEach((sh) => {
+      const g = shipStyles.get(sh.styleId) || { styleId: sh.styleId, styleRef: (byId(db, 'styles', sh.styleId) || {}).styleRef || '—', qty: 0, value: D(0), currency: null, inr: D(0), rates: [] };
+      shipStyles.set(sh.styleId, g);
+      g.qty += sh.shippedQty; g.value = g.value.add(sh.foreignValue); g.inr = g.inr.add(sh.inrValue); g.currency = sh.currency;
+      if (!g.rates.some((x) => x.rate === sh.exchangeRate && x.date === sh.rateDate)) g.rates.push({ rate: sh.exchangeRate, date: sh.rateDate });
+      shipVal[sh.currency] = D(shipVal[sh.currency] || 0).add(sh.foreignValue);
+    });
+    const shipments = Array.from(shipStyles.values()).map((g) => { const rows = r.shipments.rows.filter((x) => x.styleId === g.styleId); return Object.assign({}, g, { value: g.value.round(2).toString(), inr: g.inr.round(2).toString(), status: rows.length && rows.every((x) => x.final) ? 'COMPLETED' : 'PENDING' }); });
+    // ---- INR receipts: pool additions / deductions + shipment bill line items ----
+    const styleRefOf = (id) => (id ? (byId(db, 'styles', id) || {}).styleRef || '—' : 'For all');
+    const adjDetails = r.adjustments.list.map((x) => ({ type: x.type, label: x.itemName || x.reason, details: [x.disposition === 'STOCK' ? 'Stock' : x.disposition === 'DISPOSED' ? 'Disposed' : '', x.qty ? `${x.qty} ${x.unit || ''} × ${x.rate}` : '', x.details || ''].filter(Boolean).join(' · '), amount: x.amount, belongs: styleRefOf(x.styleId), source: x.adjNo }))
+      .concat(...r.shipments.list.map((sh) => (sh.additions || []).map((x) => ({ type: 'ADDITION', label: x.desc, details: 'Shipment bill', amount: x.amount, belongs: styleRefOf(sh.styleId), source: sh.shipNo }))
+        .concat((sh.deductions || []).map((x) => ({ type: 'DEDUCTION', label: x.desc, details: 'Shipment bill', amount: x.amount, belongs: styleRefOf(sh.styleId), source: sh.shipNo })))));
+    // ---- costing items vs expense entries, per category ----
+    const costItems = [], seen = new Set();
+    allocs.forEach((x) => { if (!x.costing) return; (x.costing.lines || []).forEach((l) => { const k = `${x.style.id}:${l.id}`; if (seen.has(k)) return; seen.add(k); costItems.push({ styleId: x.style.id, styleRef: x.style.styleRef, category: l.category, name: l.name, details: [l.composition, l.gsm && l.gsm + ' GSM', l.colour, l.description].filter(Boolean).join(' · '), rate: l.rate, perPc: l.qty === '' || l.qty == null ? '1' : l.qty, unit: l.unit || '', rateUnit: l.rateUnit || l.unit || '' }); }); });
+    const exps = db.expenses.filter((e) => e.poolId === poolId && !e.deletedAt && e.status === 'SAVED');
+    const expRow = (e) => ({ expNo: e.expNo, styleId: e.styleId || null, styleRef: e.styleId ? styleRefOf(e.styleId) : 'Shared', category: e.category, categoryLabel: catLabel(e.category, db), item: e.itemName, details: [e.fabClass && e.category === 'FABRIC' ? e.fabClass : '', e.colour, e.spec].filter(Boolean).join(' · '), qty: e.qty, unit: e.unit || '', rate: e.rate, bill: e.billAmount, amount: e.amount, vendor: e.category === 'CMT' ? e.factory : e.vendor });
+    const sections = categories(db).map((c) => { const ex = exps.filter((e) => e.category === c.key); return { category: c.key, label: c.label, costing: costItems.filter((i) => i.category === c.key), expenses: ex.map(expRow), total: sum(ex, (e) => D(e.amount)).toString() }; }).filter((x) => x.costing.length || x.expenses.length);
+    // deviations: same style + category + item, but the expense rate differs from the costing rate (shared expenses excluded)
+    const deviations = [], dk = new Set();
+    exps.filter((e) => e.styleId).forEach((e) => {
+      const ci = costItems.find((i) => i.styleId === e.styleId && i.category === e.category && normItem(i.name) === normItem(e.itemName)); if (!ci) return;
+      const dev = D(e.rate).sub(ci.rate); if (dev.isZero()) return;
+      const k = `${e.styleId}|${e.category}|${normItem(e.itemName)}|${e.rate}`; if (dk.has(k)) return; dk.add(k);
+      deviations.push({ styleRef: styleRefOf(e.styleId), category: e.category, categoryLabel: catLabel(e.category, db), item: e.itemName, costing: ci.rate, expense: e.rate, deviation: dev.toString(), expNo: e.expNo });
+    });
+    // expenses other than costing (not for fabric): expense items with no matching costing item
+    const others = exps.filter((e) => e.category !== 'FABRIC' && !costItems.some((i) => i.category === e.category && normItem(i.name) === normItem(e.itemName) && (!e.styleId || i.styleId === e.styleId))).map(expRow);
+    const fix = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, D(v).round(2).toString()]));
+    return {
+      r, closed, marginVariance,
+      orders: orders.map((o) => Object.assign(o, { value: o.value.round(2).toString() })), orderTotals: { qty: orders.reduce((a, o) => a + o.qty, 0), value: fix(orderVal) },
+      shipments, shipTotals: { qty: shipments.reduce((a, x) => a + x.qty, 0), value: fix(shipVal) },
+      receipts: { shipmentInr: r.totals.shipmentInr, additions: r.totals.additions, deductions: r.totals.deductions, inrReceived: r.totals.inrReceived, details: adjDetails },
+      categoryTotals: r.byCat, sections, deviations, others,
+    };
+  }
   svc.closureChecks = (poolId) => closureChecks(Store.db, poolId);
   svc.poolItems = (poolId) => poolItems(Store.db, poolId);
   svc.setItemVerified = (poolId, key, value) => mut('pools.edit', (db) => {
@@ -2414,7 +2481,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
   G.SP = G.SP || {};
   Object.assign(G.SP, {
     AppError, Store, svc, IDBAdapter, LocalStorageAdapter, MemoryAdapter, PERMS, ROLES, DEFAULT_ROLE_PERMS, can, requirePerm, categories, catLabel,
-    lineMetrics, rateOn, computePool, closureChecks, poolItems, byId, uid, today, now, clone, parseCsv, emptyDb, IMPORTS,
+    lineMetrics, rateOn, computePool, closureChecks, poolItems, reportData, byId, uid, today, now, clone, parseCsv, emptyDb, IMPORTS,
   });
 })(typeof window !== 'undefined' ? window : globalThis);
 
@@ -4151,7 +4218,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
     const m = modal({
       title: `${e ? 'Edit' : 'Add'} ${H.catLabel(cat)} expense${e ? ' ' + e.expNo : ''} — ${p.poolNo}`, size: 'lg',
       body: `<div class="form-grid">
-        ${isF || isA ? `<input type="hidden" name="styleId" value="${esc(v0.styleId || '')}">` : UI.field({ name: 'styleId', label: 'Style', type: 'select', options: styleOpts, placeholder: false, span: 's6' }, v0.styleId || '')}
+        ${isF ? `<input type="hidden" name="styleId" value="${esc(v0.styleId || '')}">` : UI.field({ name: 'styleId', label: 'Style', type: 'select', options: styleOpts, placeholder: false, span: 's6' }, v0.styleId || '')}
         ${isF ? UI.field({ name: 'fabClass', label: 'Material / Process / Others', type: 'select', options: ['Material', 'Process', 'Others'], placeholder: false, span: 's6' }, v0.fabClass || 'Material') : UI.field({ name: 'costingPick', label: `Fetch from costing inputs`, type: 'select', options: [], placeholder: '— Manual entry —', span: 's6', help: can('expenses.edit') ? 'Or type a manual item below' : '' })}
         ${UI.field({ name: 'itemName', label: isF ? 'Fabric' : isA ? 'Application type' : isC ? 'CMT operation / details' : 'Item / description', required: true, span: 's6' }, v0.itemName)}
         ${isF ? UI.field({ name: 'colour', label: 'Colour', span: 's3' }, v0.colour) + UI.field({ name: 'spec', label: 'Fabric specification', span: 's3' }, v0.spec) : UI.field({ name: 'spec', label: 'Details', span: 's6' }, v0.spec)}
@@ -4195,7 +4262,7 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
       const o = opts.find((x) => x.key === S('costingPick').value); if (!o) { S('source').value = 'MANUAL'; return; }
       S('itemName').value = o.l.name; S('rate').value = o.l.rate; if (o.l.unit) S('unit').value = isF ? (o.l.rateUnit || o.l.unit) : o.l.unit;
       if (isF) { S('colour').value = o.l.colour || ''; S('spec').value = [o.l.composition, o.l.gsm && o.l.gsm + ' GSM', o.l.description].filter(Boolean).join(' · '); }
-      if (!isF && !isA && !S('styleId').value) S('styleId').value = o.styleId;
+      if (!isF && !S('styleId').value) S('styleId').value = o.styleId;
       if (!isF && !S('qty').value) { const s = r.styles.find((x) => x.styleId === o.styleId); if (s) S('qty').value = s.refQty ? s.refQty.qty : s.allocQty; }
       S('source').value = 'COSTING'; S('costingRef').value = `${o.v.label}:${o.l.name}`; upd(); hint();
     });
@@ -4570,15 +4637,17 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
   /* ======================= PROFITABILITY ======================= */
   App.route('profitability', 'reports.view', async (view, q) => {
     const db = Store.db;
-    const tab = q.tab || (q.pool ? 'pool' : 'pools');
+    const tab = (q.tab === 'style' ? '' : q.tab) || (q.pool ? 'pool' : 'pools');
+    const closedOnly = ['pools', 'buyer', 'season', 'category'].includes(tab); // only Pool detail shows open pools
     const f = { buyer: q.buyer || '', season: q.season || '', from: q.from || '', to: q.to || '', st: q.st || '' };
-    const pools = db.pools.filter((p) => p.status !== 'CANCELLED' && (!f.buyer || p.buyerId === f.buyer) && (!f.season || p.season === f.season) && (!f.st || (f.st === 'CLOSED' ? p.status === 'CLOSED' : p.status !== 'CLOSED')) &&
+    const pools = db.pools.filter((p) => p.status !== 'CANCELLED' && (!closedOnly || p.status === 'CLOSED') && (!f.buyer || p.buyerId === f.buyer) && (!f.season || p.season === f.season) && (!f.st || (f.st === 'CLOSED' ? p.status === 'CLOSED' : p.status !== 'CLOSED')) &&
       (!f.from && !f.to || db.shipments.some((s) => s.poolId === p.id && !s.deletedAt && (!f.from || s.shipmentDate >= f.from) && (!f.to || s.shipmentDate <= f.to))));
     const reps = pools.map((p) => SP.computePool(db, p.id));
-    const TABS = [['pools', 'Pool-level'], ['pool', 'Pool detail'], ['style', 'Style-wise'], ['buyer', 'Buyer-wise'], ['season', 'Season-wise'], ['category', 'Category comparison']];
+    const TABS = [['pools', 'Pool-level'], ['pool', 'Pool detail'], ['buyer', 'Buyer-wise'], ['season', 'Season-wise'], ['category', 'Category comparison']];
     view.innerHTML = pageHead('Profitability Reports', 'Budget-based margin = INR received − expense limits (estimate). Actual expense-based margin = INR received − actual expenses (result). Additions and deductions are included once, inside INR received.') +
       `<div class="tabs" role="tablist">${TABS.map(([k, l]) => `<button role="tab" class="${k === tab ? 'on' : ''}" data-tab="${k}">${l}</button>`).join('')}</div>` +
-      (tab !== 'pool' ? `<form class="filters" id="pf">${UI.field({ name: 'buyer', label: 'Buyer', type: 'select', options: H.allBuyerOpts(), placeholder: 'All' }, f.buyer)}${UI.field({ name: 'season', label: 'Season', type: 'select', options: H.seasonOpts(), placeholder: 'All' }, f.season)}${UI.field({ name: 'st', label: 'Closure', type: 'select', options: [{ value: 'CLOSED', label: 'Closed' }, { value: 'OPEN', label: 'Open' }], placeholder: 'All' }, f.st)}${UI.field({ name: 'from', label: 'Shipments from', type: 'date' }, f.from)}${UI.field({ name: 'to', label: 'to', type: 'date' }, f.to)}</form>` : '') + '<div id="pbody"></div>';
+      (tab === 'pool' ? '<div class="notice info">All pools (open / closed) can be viewed.</div>' : '<div class="notice warn">Can be viewed for <b>closed pools only</b>.</div>') +
+      (tab !== 'pool' ? `<form class="filters" id="pf">${UI.field({ name: 'buyer', label: 'Buyer', type: 'select', options: H.allBuyerOpts(), placeholder: 'All' }, f.buyer)}${UI.field({ name: 'season', label: 'Season', type: 'select', options: H.seasonOpts(), placeholder: 'All' }, f.season)}${UI.field({ name: 'from', label: 'Shipments from', type: 'date' }, f.from)}${UI.field({ name: 'to', label: 'to', type: 'date' }, f.to)}</form>` : '') + '<div id="pbody"></div>';
     $$('[data-tab]', view).forEach((b) => (b.onclick = () => App.go('profitability', Object.assign({}, q, { tab: b.dataset.tab }))));
     const pf = $('#pf', view); if (pf) pf.onchange = () => App.go('profitability', Object.assign({ tab }, read(pf)));
     const body = $('#pbody', view);
@@ -4621,13 +4690,6 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
       const p = q.pool && byId(db, 'pools', q.pool);
       if (!p) { body.insertAdjacentHTML('beforeend', '<div class="card">' + empty('Select a pool') + '</div>'); return; }
       poolReport(body, p);
-    } else if (tab === 'style') {
-      const rows = []; reps.forEach((r) => r.styleProfit.forEach((x) => rows.push(Object.assign({ poolNo: r.pool.poolNo, poolId: r.pool.id }, x))));
-      body.innerHTML = '<div class="notice info">Style-wise: INR from that style\'s shipments; limits and actuals from style-specific entries. Pool-level additions/deductions and shared (all-style) expenses are <b>not</b> allocated to styles, so style totals will not add up to pool totals.</div><div class="card"><div class="bd p0" id="pt"></div></div>';
-      table($('#pt', body), {
-        id: 'profit-style', rows, exportName: 'style-profitability',
-        columns: [{ key: 'styleRef', label: 'Style', render: (x) => `<b>${esc(x.styleRef)}</b><div class="small muted">${esc(x.description || '')}</div>` }, { key: 'poolNo', label: 'Pool' }, { key: 'allocQty', label: 'Pool qty', num: true }, { key: 'shipped', label: 'Shipped', num: true }, { key: 'inr', label: 'Shipment INR', num: true, render: (x) => Fmt.inr(x.inr) }, { key: 'limit', label: 'Expense limits', num: true, render: (x) => Fmt.inr(x.limit) }, { key: 'actual', label: 'Actual (style entries)', num: true, render: (x) => Fmt.inr(x.actual) }, { key: 'budgetMargin', label: 'Budget-based', num: true, render: (x) => signed(x.budgetMargin) }, { key: 'actualMargin', label: 'Actual-based', num: true, render: (x) => signed(x.actualMargin) }],
-      });
     } else if (tab === 'buyer' || tab === 'season') {
       const rows = tab === 'buyer' ? agg('buyer', (r) => (r.buyer || {}).name, (r) => r.pool.buyerId) : agg('season', (r) => r.pool.season || '(no season)', (r) => r.pool.season || '');
       body.innerHTML = '<div class="card"><div class="bd p0" id="pt"></div></div>';
@@ -4640,12 +4702,58 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
       table($('#pt', body), { id: 'profit-cat', rows, exportName: 'category-comparison', noPaging: true, columns: [{ key: 'label', label: 'Category', render: (x) => `<b>${esc(x.label)}</b>` }, { key: 'limit', label: 'Expense limits', num: true, render: (x) => Fmt.inr(x.limit) }, { key: 'actual', label: 'Actual', num: true, render: (x) => Fmt.inr(x.actual) }, { key: 'diff', label: 'Difference (limit − actual)', num: true, render: (x) => signed(x.diff) }, { key: 'pct', label: 'Diff %', num: true, render: (x) => (x.pct === null ? '—' : Fmt.pct(x.pct)) }, { key: 'status', label: 'Status', render: (x) => status(x.status) }] });
     }
   });
+  /* ---- final report sections (shared by screen and print) ---- */
+  function reportSections(d, P) {
+    const card = (title, inner, note) => (P ? `<h2>${title}</h2>${note ? `<p class="muted">${note}</p>` : ''}${inner}` : `<div class="card"><div class="hd"><h2>${title}</h2>${note ? `<span class="small muted">${note}</span>` : ''}</div><div class="bd p0"><div class="table-wrap">${inner}</div></div></div>`);
+    const T = (head, rows, foot) => `<table class="t"><thead><tr>${head.map((h) => `<th${h.n ? ' class="num"' : ''}>${h.t}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.join('') : `<tr><td colspan="${head.length}" class="empty small">None</td></tr>`}</tbody>${foot ? `<tfoot><tr>${foot}</tr></tfoot>` : ''}</table>`;
+    const N = (x, dp = 2) => (x === null || x === undefined || x === '' ? '—' : Fmt.num(x, dp));
+    const q = (x) => `${Fmt.num(x.qty, 3).replace(/\.?0+$/, '')} ${esc(x.unit || '')}`;
+    const curTot = (o) => Object.entries(o).map(([c, v]) => Fmt.money(v, c)).join(' + ') || '—';
+    const ex = (rate, date) => (rate ? `${Fmt.num(rate, 2)}${date ? ` (${fmtDate(date)})` : ''}` : '—');
+    // Orders / shipments
+    const ordersT = T([{ t: 'Style' }, { t: 'Order qty', n: 1 }, { t: 'Conf. rate', n: 1 }, { t: 'Value', n: 1 }, { t: 'Exchange (costing)', n: 1 }],
+      d.orders.map((o) => `<tr><td><b>${esc(o.styleRef)}</b></td><td class="num">${Fmt.qty(o.qty)}</td><td class="num">${Fmt.money(o.price, o.currency)}</td><td class="num">${Fmt.money(o.value, o.currency)}</td><td class="num">${ex(o.exchangeRate, o.rateDate)}</td></tr>`),
+      `<td>Total</td><td class="num">${Fmt.qty(d.orderTotals.qty)}</td><td></td><td class="num">${curTot(d.orderTotals.value)}</td><td></td>`);
+    const shipT = T([{ t: 'Style' }, { t: 'Shipped qty', n: 1 }, { t: 'Value', n: 1 }, { t: 'Exchange', n: 1 }, { t: 'Status' }],
+      d.shipments.map((x) => `<tr><td><b>${esc(x.styleRef)}</b></td><td class="num">${Fmt.qty(x.qty)}</td><td class="num">${x.currency ? Fmt.money(x.value, x.currency) : '—'}</td><td class="num">${x.rates.map((y) => ex(y.rate, y.date)).join('<br>') || '—'}</td><td>${x.status === 'COMPLETED' ? (P ? 'Completed' : badge('Completed', 'ok')) : (P ? 'Pending' : badge('Pending', 'warn'))}</td></tr>`),
+      `<td>Total</td><td class="num">${Fmt.qty(d.shipTotals.qty)}</td><td class="num">${curTot(d.shipTotals.value)}</td><td colspan="2"></td>`);
+    const os = P ? card('Orders', ordersT) + card('Shipments', shipT) : `<div class="grid2">${card('Orders', ordersT)}${card('Shipments', shipT)}</div>`;
+    // Shipments / INR receipts
+    const rc = d.receipts;
+    const recT = `<table class="t"><tbody><tr><td>Total shipment value</td><td class="num"><b>${Fmt.inr(rc.shipmentInr)}</b><div class="small faint">${curTot(d.shipTotals.value)}</div></td></tr><tr><td>Total addition</td><td class="num">${Fmt.inr(rc.additions)}</td></tr><tr><td>Total deduction</td><td class="num">${Fmt.inr(rc.deductions)}</td></tr><tr><td><b>Total INR received</b></td><td class="num"><b>${Fmt.inr(rc.inrReceived)}</b></td></tr></tbody></table>`;
+    const adjT = T([{ t: 'Type' }, { t: 'Item / reason' }, { t: 'Details' }, { t: 'Belongs to' }, { t: 'Ref' }, { t: 'Amount', n: 1 }],
+      rc.details.map((x) => `<tr><td>${x.type === 'ADDITION' ? '<span class="pos">Addition</span>' : '<span class="neg">Deduction</span>'}</td><td><b>${esc(x.label)}</b></td><td class="small">${esc(x.details || '')}</td><td>${esc(x.belongs)}</td><td class="small">${esc(x.source || '')}</td><td class="num">${x.type === 'ADDITION' ? '+' : '−'}${Fmt.inr(x.amount)}</td></tr>`));
+    const receipts = P ? card('Shipments / INR receipts', recT) + card('Addition &amp; deduction details', adjT) : `<div class="grid2">${card('Shipments / INR receipts', recT)}${card('Addition &amp; deduction details', adjT)}</div>`;
+    // Expense summary — category totals
+    const catT = T([{ t: 'Category' }, { t: 'Entries', n: 1 }, { t: 'Actual', n: 1 }, { t: 'Expense limit', n: 1 }, { t: 'Difference (limit − actual)', n: 1 }, { t: 'Status' }],
+      d.categoryTotals.map((c) => `<tr><td>${esc(c.label)}</td><td class="num">${c.entries}</td><td class="num">${Fmt.inr(c.actual)}</td><td class="num">${Fmt.inr(c.limit)}</td><td class="num">${P ? Fmt.inr(c.diff) : signed(c.diff)}</td><td>${c.status === 'OVER' ? (P ? 'Over' : badge('Over', 'bad')) : (P ? 'Within' : badge('Within limit', 'ok'))}</td></tr>`),
+      `<td>Total</td><td class="num">${d.categoryTotals.reduce((a, c) => a + c.entries, 0)}</td><td class="num">${Fmt.inr(d.r.totals.totalActual)}</td><td class="num">${Fmt.inr(d.r.totals.totalLimits)}</td><td class="num">${Fmt.inr(d.r.totals.expenseDiff)}</td><td></td>`);
+    // Per category: costing items + expense entries
+    const catSecs = d.sections.map((sx) => {
+      const isF = sx.category === 'FABRIC';
+      const cT = T([{ t: 'Style' }, { t: 'Item' }, { t: 'Details' }, { t: 'Base rate', n: 1 }].concat(isF ? [] : [{ t: 'Per pc', n: 1 }]),
+        sx.costing.map((i) => `<tr><td>${esc(i.styleRef)}</td><td><b>${esc(i.name)}</b></td><td class="small">${esc(i.details)}</td><td class="num">${N(i.rate)}${i.rateUnit && isF ? `<span class="small faint"> /${esc(i.rateUnit)}</span>` : ''}</td>${isF ? '' : `<td class="num">${esc(i.perPc)}</td>`}</tr>`));
+      const eT = T([{ t: 'Entry' }, { t: 'Style' }, { t: 'Item' }, { t: 'Qty', n: 1 }, { t: 'Rate', n: 1 }, { t: 'Bill', n: 1 }, { t: 'Amount', n: 1 }, { t: sx.category === 'CMT' ? 'Factory' : 'Vendor' }],
+        sx.expenses.map((e) => `<tr><td>${esc(e.expNo)}</td><td>${esc(e.styleRef)}</td><td><b>${esc(e.item)}</b>${e.details ? `<div class="small muted">${esc(e.details)}</div>` : ''}</td><td class="num">${q(e)}</td><td class="num">${N(e.rate)}</td><td class="num">${e.bill === null || e.bill === undefined ? '—' : N(e.bill)}</td><td class="num">${N(e.amount)}</td><td>${esc(e.vendor || '')}</td></tr>`),
+        `<td colspan="6">Total</td><td class="num"><b>${Fmt.inr(sx.total)}</b></td><td></td>`);
+      return card(`${esc(sx.label)} costing`, cT) + card(`${esc(sx.label)} expense`, eT);
+    }).join('');
+    const devT = T([{ t: 'Style' }, { t: 'Category' }, { t: 'Item' }, { t: 'Costing', n: 1 }, { t: 'Expense', n: 1 }, { t: 'Deviation', n: 1 }],
+      d.deviations.map((x) => `<tr><td>${esc(x.styleRef)}</td><td>${esc(x.categoryLabel)}</td><td><b>${esc(x.item)}</b></td><td class="num">${N(x.costing)}</td><td class="num">${N(x.expense)}</td><td class="num"><b class="${D(x.deviation).isNeg() ? 'pos' : 'neg'}">${N(D(x.deviation).abs().toString())}</b></td></tr>`));
+    const othT = T([{ t: 'Category' }, { t: 'Entry' }, { t: 'Style' }, { t: 'Item' }, { t: 'Qty', n: 1 }, { t: 'Rate', n: 1 }, { t: 'Bill', n: 1 }, { t: 'Amount', n: 1 }, { t: 'Vendor / factory' }],
+      d.others.map((e) => `<tr><td>${esc(e.categoryLabel)}</td><td>${esc(e.expNo)}</td><td>${esc(e.styleRef)}</td><td><b>${esc(e.item)}</b></td><td class="num">${q(e)}</td><td class="num">${N(e.rate)}</td><td class="num">${e.bill === null || e.bill === undefined ? '—' : N(e.bill)}</td><td class="num">${N(e.amount)}</td><td>${esc(e.vendor || '')}</td></tr>`));
+    return os + receipts + card('Expense summary — category totals', catT) + catSecs +
+      card('Deviations found', devT, 'Same item, rate differs between costing and expense. Shared items are not shown here; matching rates are hidden. Red = expense above costing, green = below.') +
+      card('Expenses other than costing', othT, 'Expense items not in the costing (fabric not included). Items matching the costing, and costing-only items, are hidden.');
+  }
   function poolReport(body, p) {
-    const r = SP.computePool(Store.db, p.id);
-    const cl = Store.db.closures.filter((x) => x.poolId === p.id);
+    const d = SP.reportData(Store.db, p.id); const r = d.r; const C = d.closed; const mv = d.marginVariance;
+    const fin = (v, f) => (C ? f(v) : '<span class="faint">—</span>');
+    const cl = Store.db.closures.filter((x) => x.poolId === p.id).sort((a, b) => b.version - a.version)[0];
     body.insertAdjacentHTML('beforeend', `
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px" class="noprint">${btn('Print / PDF', 'id="rpP"', '', 'print')}${btn('Excel', 'id="rpX"', '', 'dl')}${btn('CSV', 'id="rpC"', '', 'dl')}<a class="btn" href="#/closure?pool=${p.id}">Close entry</a></div>
       ${r.errors.length ? `<div class="notice bad">${r.errors.map(esc).join('<br>')}</div>` : ''}
+      ${C ? `<div class="notice ok"><b>Final result — entries closed</b>${cl ? ` on ${fmtDT(cl.closedAt)} by ${esc(cl.closedBy)}` : ''}.</div>` : '<div class="notice warn"><b>Pool yet to be closed.</b> Please enter all data and close the pool to get the final results — margins are shown after closure.</div>'}
       <div class="kpis">
         <div class="kpi"><div class="l">Pool / buyer</div><div class="v" style="font-size:16px">${esc(p.poolNo)}</div><div class="s">${esc((r.buyer || {}).name)} · ${status(p.status)}</div></div>
         <div class="kpi"><div class="l">Order / shipped qty</div><div class="v">${Fmt.qty(r.totals.orderQty)} / ${Fmt.qty(r.totals.shippedQty)}</div></div>
@@ -4654,29 +4762,41 @@ table.t{width:100%;border-collapse:collapse;font-size:13px}
         <div class="kpi"><div class="l">Total actual expenses</div><div class="v">${Fmt.inr(r.totals.totalActual)}</div></div>
       </div>
       <div class="grid2">
-        <div class="card"><div class="hd"><h2>Budget-based margin <span class="badge info">estimate</span></h2></div><div class="bd"><div class="sumrow"><span>INR received</span><span class="num">${Fmt.inr(r.totals.inrReceived)}</span></div><div class="sumrow"><span>− Total expense limits</span><span class="num">${Fmt.inr(r.totals.totalLimits)}</span></div><div class="sumrow big"><span>Budget-based margin</span><span class="num ${D(r.margins.budgetMargin).isNeg() ? 'neg' : ''}">${Fmt.inr(r.margins.budgetMargin)}</span></div><div class="small muted">${Fmt.pct(r.margins.budgetMarginPct)} of INR received. Based on costing limits, not on bills.</div></div></div>
-        <div class="card"><div class="hd"><h2>Actual expense-based margin <span class="badge ok">result</span></h2></div><div class="bd"><div class="sumrow"><span>INR received (incl. additions / deductions)</span><span class="num">${Fmt.inr(r.totals.inrReceived)}</span></div><div class="sumrow"><span>− Actual expenses (saved entries)</span><span class="num">${Fmt.inr(r.totals.totalActual)}</span></div><div class="sumrow big"><span>Actual expense-based margin</span><span class="num ${D(r.margins.actualMargin).isNeg() ? 'neg' : ''}">${Fmt.inr(r.margins.actualMargin)}</span></div><div class="small muted">${Fmt.pct(r.margins.actualMarginPct)} of INR received. No other adjustments are deducted — additions/deductions are already in INR received.</div></div></div>
+        <div class="card"><div class="hd"><h2>Budget-based margin <span class="badge info">estimate</span></h2><b class="num">${fin(r.margins.budgetMargin, (v) => signed(v))}</b></div><div class="bd"><div class="sumrow"><span>INR received</span><span class="num">${Fmt.inr(r.totals.inrReceived)}</span></div><div class="sumrow"><span>− Total expense limits</span><span class="num">${Fmt.inr(r.totals.totalLimits)}</span></div><div class="sumrow big"><span>Estimated margin (incl. OH)</span><span class="num">${fin(r.margins.budgetMargin, (v) => signed(v))}</span></div><div class="small muted">${C ? `${Fmt.pct(r.margins.budgetMarginPct)} of INR received. Based on costing limits, not on bills.` : 'Pool to be closed to get the final results.'}</div></div></div>
+        <div class="card"><div class="hd"><h2>Actual expense-based margin <span class="badge ok">result</span></h2><b class="num">${fin(r.margins.actualMargin, (v) => signed(v))}</b></div><div class="bd"><div class="sumrow"><span>INR received (incl. additions / deductions)</span><span class="num">${Fmt.inr(r.totals.inrReceived)}</span></div><div class="sumrow"><span>− Actual expenses (saved entries)</span><span class="num">${Fmt.inr(r.totals.totalActual)}</span></div><div class="sumrow big"><span>Actual margin (incl. OH)</span><span class="num">${fin(r.margins.actualMargin, (v) => signed(v))}</span></div><div class="small muted">${C ? `${Fmt.pct(r.margins.actualMarginPct)} of INR received.` : 'Pool to be closed to get the final results.'}</div></div></div>
       </div>
-      <div class="card"><div class="hd"><h2>Category-wise expense variance</h2></div><div class="bd p0" id="rc"></div></div>
-      <div class="grid2"><div class="card"><div class="hd"><h2>Costing variance</h2></div><div class="bd">${r.variance.styles.map((s) => `<div class="sumrow"><span>${esc(s.styleRef)}</span><span class="num">${Fmt.pct(s.pct)}</span></div>`).join('')}<div class="sumrow total"><span>Applied</span><span class="num">${r.variance.override ? Fmt.pct(r.variance.override.pct) + ' (override)' : r.variance.scope === 'STYLE' ? 'per style' : Fmt.pct(r.variance.computedPoolPct)}</span></div></div></div>
-      <div class="card"><div class="hd"><h2>Status</h2></div><div class="bd"><div class="sumrow"><span>Missing / additional items</span><span>${r.exceptions.total} total · ${r.exceptions.pending ? badge(r.exceptions.pending + ' pending', 'warn') : badge('all decided', 'ok')}</span></div><div class="sumrow"><span>Draft expense entries</span><span>${r.expenses.drafts}</span></div><div class="sumrow"><span>Closure</span><span>${status(p.status)} ${cl.length ? `v${cl[cl.length - 1].version} ${fmtDT(cl[cl.length - 1].closedAt)}` : ''}</span></div></div></div></div>`);
-    table($('#rc', body), { id: 'rep-cat-' + p.id, noToolbar: true, noPaging: true, rows: r.byCat, columns: [{ key: 'label', label: 'Category' }, { key: 'limit', label: 'Limit', num: true, render: (x) => Fmt.inr(x.limit) }, { key: 'actual', label: 'Actual', num: true, render: (x) => Fmt.inr(x.actual) }, { key: 'diff', label: 'Difference', num: true, render: (x) => signed(x.diff) }, { key: 'diffPct', label: '%', num: true, render: (x) => (x.diffPct === null ? '—' : Fmt.pct(x.diffPct)) }, { key: 'status', label: 'Status', render: (x) => status(x.status) }], footer: () => `<td>Total</td><td class="num">${Fmt.inr(r.totals.totalLimits)}</td><td class="num">${Fmt.inr(r.totals.totalActual)}</td><td class="num">${signed(r.totals.expenseDiff)}</td><td class="num">${r.totals.expenseDiffPct === null ? '—' : Fmt.pct(r.totals.expenseDiffPct)}</td><td></td>` });
+      <div class="card"><div class="hd"><h2>Margin variance (including OH)</h2><b class="num">${fin(mv.amount, (v) => signed(v))}</b></div><div class="bd">
+        <div class="sumrow"><span>Estimated <span class="small faint">— costing: Σ qty × (Margin % + OH %) ÷ total qty</span></span><span class="num"><b>${Fmt.pct(mv.estimatedPct)}</b></span></div>
+        <div class="sumrow"><span>Actual <span class="small faint">— (total expense limit × (1 + estimated %) − actual expense) ÷ total expense limit</span></span><span class="num"><b>${mv.actualPct === null ? '—' : fin(mv.actualPct, (v) => Fmt.pct(v))}</b></span></div>
+        <div class="sumrow total"><span>Difference <span class="small faint">— actual result minus estimate</span></span><span class="num">${mv.diffPct === null ? '—' : fin(mv.diffPct, (v) => signed(v, (y) => Fmt.pct(y)))}</span></div>
+        ${C ? '' : '<div class="small muted">Actual, difference and variance amount are shown after the pool is closed.</div>'}
+      </div></div>
+      ${reportSections(d, false)}`);
+    const rowsOf = (sx) => sx.expenses.map((e) => [sx.label, e.expNo, e.styleRef, e.item, e.details, e.qty, e.unit, e.rate, e.bill, e.amount, e.vendor]);
     const sheets = () => [
-      { name: 'Summary', head: ['Item', 'Value'], rows: [['Pool', p.poolNo], ['Buyer', (r.buyer || {}).name], ['Status', p.status], ['Order qty', r.totals.orderQty], ['Shipped qty', r.totals.shippedQty], ['Shipment INR', r.totals.shipmentInr], ['Additions', r.totals.additions], ['Deductions', r.totals.deductions], ['INR received', r.totals.inrReceived], ['Total expense limits', r.totals.totalLimits], ['Total actual expenses', r.totals.totalActual], ['Budget-based margin', r.margins.budgetMargin], ['Budget-based margin %', r.margins.budgetMarginPct], ['Actual expense-based margin', r.margins.actualMargin], ['Actual expense-based margin %', r.margins.actualMarginPct], ['Variance applied %', r.variance.override ? r.variance.override.pct : r.variance.computedPoolPct]] },
-      { name: 'Categories', head: ['Category', 'Limit', 'Actual', 'Difference', 'Diff %', 'Status'], rows: r.byCat.map((c) => [c.label, c.limit, c.actual, c.diff, c.diffPct, c.status]) },
-      { name: 'Style x Category', head: ['Style', 'Category', 'Qty', 'Cost/pc', 'Variance %', 'Limit', 'Actual', 'Difference', 'Status'], rows: r.limits.map((l) => [l.styleRef, l.categoryLabel, l.qty, l.costPerPiece, l.variancePct, l.limit, l.actual, l.diff, l.status]) },
-      { name: 'Styles', head: ['Style', 'Qty', 'Shipped', 'Shipment INR', 'Limits', 'Actual', 'Budget margin', 'Actual margin'], rows: r.styleProfit.map((x) => [x.styleRef, x.allocQty, x.shipped, x.inr, x.limit, x.actual, x.budgetMargin, x.actualMargin]) },
+      { name: 'Summary', head: ['Item', 'Value'], rows: [['Pool', p.poolNo], ['Buyer', (r.buyer || {}).name], ['Status', p.status], ['Order qty', r.totals.orderQty], ['Shipped qty', r.totals.shippedQty], ['Shipment INR', r.totals.shipmentInr], ['Additions', r.totals.additions], ['Deductions', r.totals.deductions], ['INR received', r.totals.inrReceived], ['Total expense limits', r.totals.totalLimits], ['Total actual expenses', r.totals.totalActual], ['Estimated margin (incl. OH)', C ? r.margins.budgetMargin : ''], ['Actual margin (incl. OH)', C ? r.margins.actualMargin : ''], ['Margin variance — estimated %', mv.estimatedPct], ['Margin variance — actual %', C ? mv.actualPct : ''], ['Margin variance — difference %', C ? mv.diffPct : ''], ['Margin variance amount', C ? mv.amount : '']] },
+      { name: 'Orders', head: ['Style', 'Order qty', 'Conf rate', 'Currency', 'Value', 'Costing exchange', 'Exchange date'], rows: d.orders.map((o) => [o.styleRef, o.qty, o.price, o.currency, o.value, o.exchangeRate, o.rateDate]) },
+      { name: 'Shipments', head: ['Style', 'Shipped qty', 'Value', 'Currency', 'INR', 'Exchange', 'Status'], rows: d.shipments.map((x) => [x.styleRef, x.qty, x.value, x.currency, x.inr, x.rates.map((y) => `${y.rate} (${y.date})`).join('; '), x.status]) },
+      { name: 'Additions & deductions', head: ['Type', 'Item / reason', 'Details', 'Belongs to', 'Ref', 'Amount'], rows: d.receipts.details.map((x) => [x.type, x.label, x.details, x.belongs, x.source, x.amount]) },
+      { name: 'Category totals', head: ['Category', 'Entries', 'Actual', 'Expense limit', 'Difference', 'Status'], rows: d.categoryTotals.map((c) => [c.label, c.entries, c.actual, c.limit, c.diff, c.status]) },
+      { name: 'Costing items', head: ['Category', 'Style', 'Item', 'Details', 'Base rate', 'Per pc'], rows: d.sections.flatMap((sx) => sx.costing.map((i) => [sx.label, i.styleRef, i.name, i.details, i.rate, i.perPc])) },
+      { name: 'Expenses', head: ['Category', 'Entry', 'Style', 'Item', 'Details', 'Qty', 'Unit', 'Rate', 'Bill', 'Amount', 'Vendor'], rows: d.sections.flatMap(rowsOf) },
+      { name: 'Deviations', head: ['Style', 'Category', 'Item', 'Costing', 'Expense', 'Deviation'], rows: d.deviations.map((x) => [x.styleRef, x.categoryLabel, x.item, x.costing, x.expense, x.deviation]) },
+      { name: 'Other than costing', head: ['Category', 'Entry', 'Style', 'Item', 'Qty', 'Unit', 'Rate', 'Bill', 'Amount', 'Vendor'], rows: d.others.map((e) => [e.categoryLabel, e.expNo, e.styleRef, e.item, e.qty, e.unit, e.rate, e.bill, e.amount, e.vendor]) },
     ];
     $('#rpX', body).onclick = () => { if (!can('reports.export')) return toast('No export permission', 'bad'); UI.downloadXLS(`${p.poolNo}-profitability`, sheets()); };
-    $('#rpC', body).onclick = () => { if (!can('reports.export')) return toast('No export permission', 'bad'); const s = sheets(); UI.downloadCSV(`${p.poolNo}-profitability`, ['Section', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I'], s.flatMap((x) => [[x.name].concat(x.head)].concat(x.rows.map((row) => [x.name].concat(row))))); };
-    $('#rpP', body).onclick = () => { if (!can('reports.export')) return toast('No export permission', 'bad'); UI.printDoc(`Profitability report — ${p.poolNo}`, profitPrintHtml(p, r)); };
+    $('#rpC', body).onclick = () => { if (!can('reports.export')) return toast('No export permission', 'bad'); const s = sheets(); UI.downloadCSV(`${p.poolNo}-profitability`, ['Section', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K'], s.flatMap((x) => [[x.name].concat(x.head)].concat(x.rows.map((row) => [x.name].concat(row))))); };
+    $('#rpP', body).onclick = () => { if (!can('reports.export')) return toast('No export permission', 'bad'); UI.printDoc(`Profitability report — ${p.poolNo}`, profitPrintHtml(p, d)); };
   }
-  function profitPrintHtml(p, r) {
+  function profitPrintHtml(p, d) {
+    const r = d.r, C = d.closed, mv = d.marginVariance;
+    const fin = (v, f) => (C ? f(v) : '—');
     return `${p.isTest ? '<div class="test">TEST DATA</div>' : ''}<div class="grid"><div><b>Pool:</b> ${esc(p.poolNo)}</div><div><b>Buyer:</b> ${esc((r.buyer || {}).name)}</div><div><b>Season:</b> ${esc(p.season || '—')}</div><div><b>Status:</b> ${esc(p.status)}</div><div><b>Order qty:</b> ${r.totals.orderQty}</div><div><b>Shipped qty:</b> ${r.totals.shippedQty}</div></div>
-      <h2>INR received</h2><table><tbody><tr><td>Total INR shipment value</td><td class="num">${Fmt.inr(r.totals.shipmentInr)}</td></tr><tr><td>+ Additions</td><td class="num">${Fmt.inr(r.totals.additions)}</td></tr><tr><td>− Deductions</td><td class="num">${Fmt.inr(r.totals.deductions)}</td></tr><tr><td><b>INR received</b></td><td class="num"><b>${Fmt.inr(r.totals.inrReceived)}</b></td></tr></tbody></table>
-      <h2>Margins</h2><table><tbody><tr><td>Budget-based margin (INR received − expense limits ${Fmt.inr(r.totals.totalLimits)}) — estimate</td><td class="num">${Fmt.inr(r.margins.budgetMargin)} (${Fmt.pct(r.margins.budgetMarginPct)})</td></tr><tr><td>Actual expense-based margin (INR received − actual expenses ${Fmt.inr(r.totals.totalActual)}) — result</td><td class="num"><b>${Fmt.inr(r.margins.actualMargin)}</b> (${Fmt.pct(r.margins.actualMarginPct)})</td></tr></tbody></table>
-      <h2>Category-wise expense variance</h2><table><thead><tr><th>Category</th><th class="num">Limit</th><th class="num">Actual</th><th class="num">Limit − actual</th><th class="num">%</th></tr></thead><tbody>${r.byCat.map((c) => `<tr><td>${esc(c.label)}</td><td class="num">${Fmt.num(c.limit)}</td><td class="num">${Fmt.num(c.actual)}</td><td class="num">${Fmt.num(c.diff)}</td><td class="num">${c.diffPct === null ? '—' : Fmt.pct(c.diffPct)}</td></tr>`).join('')}</tbody><tfoot><tr><td>Total</td><td class="num">${Fmt.num(r.totals.totalLimits)}</td><td class="num">${Fmt.num(r.totals.totalActual)}</td><td class="num">${Fmt.num(r.totals.expenseDiff)}</td><td class="num">${r.totals.expenseDiffPct === null ? '—' : Fmt.pct(r.totals.expenseDiffPct)}</td></tr></tfoot></table>
-      <p class="muted">Costing variance applied: ${r.variance.override ? Fmt.pct(r.variance.override.pct) + ' (approved override: ' + esc(r.variance.override.reason) + ')' : Fmt.pct(r.variance.computedPoolPct)}. Missing/additional items: ${r.exceptions.total} (${r.exceptions.pending} pending). Formula ${esc(Calc.FORMULA_VERSION)}.</p>`;
+      <p><b>${C ? 'Final result — entries closed.' : 'Pool yet to be closed — margins are shown after closure.'}</b></p>
+      <h2>Margins</h2><table><tbody><tr><td>INR received</td><td class="num">${Fmt.inr(r.totals.inrReceived)}</td></tr><tr><td>Total expense limits</td><td class="num">${Fmt.inr(r.totals.totalLimits)}</td></tr><tr><td>Total actual expenses</td><td class="num">${Fmt.inr(r.totals.totalActual)}</td></tr><tr><td><b>Estimated margin (incl. OH)</b> — INR received − expense limits</td><td class="num"><b>${fin(r.margins.budgetMargin, (v) => Fmt.inr(v))}</b></td></tr><tr><td><b>Actual margin (incl. OH)</b> — INR received − actual expenses</td><td class="num"><b>${fin(r.margins.actualMargin, (v) => Fmt.inr(v))}</b></td></tr></tbody></table>
+      <h2>Margin variance (including OH)</h2><table><tbody><tr><td>Estimated % (costing: Σ qty × (Margin % + OH %) ÷ total qty)</td><td class="num">${Fmt.pct(mv.estimatedPct)}</td></tr><tr><td>Actual % ((limit × (1 + est %) − actual) ÷ limit)</td><td class="num">${mv.actualPct === null ? '—' : fin(mv.actualPct, (v) => Fmt.pct(v))}</td></tr><tr><td>Difference (actual − estimate)</td><td class="num">${mv.diffPct === null ? '—' : fin(mv.diffPct, (v) => Fmt.pct(v))}</td></tr><tr><td>Variance amount</td><td class="num">${fin(mv.amount, (v) => Fmt.inr(v))}</td></tr></tbody></table>
+      ${reportSections(d, true)}
+      <p class="muted">Formula ${esc(Calc.FORMULA_VERSION)}. Expense limit = qty × costing cost/pc (incl. allow %) × (1 + Rej %) × (1 + variance %).</p>`;
   }
 
   /* ======================= ADDITION & DEDUCTION ======================= */
